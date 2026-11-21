@@ -1,6 +1,6 @@
 # SurroundRoom
 
-SurroundRoom ("Rodear habitación") is a plug-in for [Sweet Home 3D](https://www.sweethome3d.com) that surrounds floors and walls with copies of a piece of furniture: hedges around a garden, chairs along a wall, a fence around a terrace, and so on.
+SurroundRoom is a plug-in for [Sweet Home 3D](https://www.sweethome3d.com) that surrounds floors and walls with copies of a piece of furniture: hedges around a garden, chairs along a wall, a fence around a terrace, and so on.
 
 ![SurroundRoom 2 window](docs/SR2_01_dialog.png)
 

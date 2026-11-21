@@ -1,0 +1,7 @@
+build/
+dist/
+nbproject/
+sh3d-dev/
+*.sh3p
+build.xml
+manifest.mf

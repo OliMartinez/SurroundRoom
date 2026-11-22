@@ -492,6 +492,7 @@ public class SurroundConfigFrame extends JFrame {
 
     /** Callback executed when Outside vs. Inside placement mode changes. */
     private void modeChanged() {
+        typePanel.setInside(modePanel.isInterior());
         syncTargetSideDefaults();
         settingsChanged();
         updateSidesSummary();

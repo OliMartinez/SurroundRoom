@@ -144,6 +144,9 @@ public class SideEndsPanel extends JPanel {
     /** Whether the surround orientation is interior. */
     private boolean interior;
 
+    /** Whether collinear sides are merged into one side. */
+    private boolean mergeCollinear;
+
     /** Set of rooms that are always forced to exterior orientation (e.g. open wall groups). */
     private Set<Room> alwaysExterior = Collections.emptySet();
 
@@ -368,6 +371,7 @@ public class SideEndsPanel extends JPanel {
         this.rooms = rooms != null ? rooms : Collections.emptyList();
         this.roomNames = roomNames != null ? roomNames : Collections.emptyList();
         this.interior = interior;
+        this.mergeCollinear = mergeCollinear;
         this.alwaysExterior = alwaysExterior != null ? alwaysExterior : Collections.emptySet();
         this.dialogMode = dialogMode;
         this.defaultHalfObjectLength = Math.max(1.0, defaultHalfObjectLength);
@@ -768,7 +772,7 @@ public class SideEndsPanel extends JPanel {
         }
         double len = SideModel.length(polys.get(side));
         double clampedShown = Math.max(0.0, Math.min(len, shownDist));
-        double nativeDist = isReversed(currentRoom) ? (len - clampedShown) : clampedShown;
+        double nativeDist = isShownReversed(currentRoom) ? (len - clampedShown) : clampedShown;
         workingStartPoints.put(currentRoom, new double[]{side, nativeDist});
         updatingStartSpinner = true;
         try {
@@ -800,11 +804,11 @@ public class SideEndsPanel extends JPanel {
         if (polys == null || polys.isEmpty()) {
             return;
         }
-        double[] sp = workingStartPoints.get(currentRoom);
-        int side = sp != null ? Math.max(0, Math.min(polys.size() - 1, (int) Math.round(sp[0]))) : 0;
+        double[] sp = startPoint(currentRoom);
+        int side = Math.max(0, Math.min(polys.size() - 1, (int) Math.round(sp[0])));
         double len = SideModel.length(polys.get(side));
-        double nativeDist = sp != null ? Math.max(0.0, Math.min(len, sp[1])) : (isReversed(currentRoom) ? len : 0.0);
-        double shownDist = isReversed(currentRoom) ? (len - nativeDist) : nativeDist;
+        double nativeDist = Math.max(0.0, Math.min(len, sp[1]));
+        double shownDist = isShownReversed(currentRoom) ? (len - nativeDist) : nativeDist;
         updatingStartSpinner = true;
         try {
             if (table.getRowCount() > side) {
@@ -874,7 +878,7 @@ public class SideEndsPanel extends JPanel {
                 ends.excludedSegmentsModifiedByUser = true;
                 List<double[]> segs = ends.excludedSegments.get(side);
                 if (idx < segs.size()) {
-                    segs.remove(isReversed(currentRoom) ? segs.size() - 1 - idx : idx);
+                    segs.remove(isShownReversed(currentRoom) ? segs.size() - 1 - idx : idx);
                     tableModel.fireTableRowsUpdated(side, side);
                     updateSegmentList();
                     triggerAsyncPreview();
@@ -1017,6 +1021,17 @@ public class SideEndsPanel extends JPanel {
         return SurroundGeometryEngine.isTraversalReversed(room, interior && !alwaysExterior.contains(room));
     }
 
+    /** Returns the Type 7 start point of the room chosen by the user, or its default one. */
+    private double[] startPoint(Room room) {
+        double[] sp = workingStartPoints.get(room);
+        return sp != null ? sp : SurroundGeometryEngine.defaultType7Start(room, mergeCollinear);
+    }
+
+    /** Whether the sides of the room are shown walked backwards (the same direction inside and outside). */
+    private boolean isShownReversed(Room room) {
+        return SurroundGeometryEngine.isShownReversed(room);
+    }
+
     private List<List<double[]>> obstacleHints(Room face) {
         if (face == null) {
             return Collections.emptyList();
@@ -1068,7 +1083,7 @@ public class SideEndsPanel extends JPanel {
 
     private List<double[]> shownSegments(List<double[]> stored, double length) {
         List<double[]> shown = new ArrayList<>();
-        boolean reversed = isReversed(currentRoom);
+        boolean reversed = isShownReversed(currentRoom);
         for (int i = 0; i < stored.size(); i++) {
             double[] s = stored.get(reversed ? stored.size() - 1 - i : i);
             shown.add(reversed ? new double[]{length - s[1], length - s[0]} : new double[]{s[0], s[1]});
@@ -1077,7 +1092,7 @@ public class SideEndsPanel extends JPanel {
     }
 
     private double[] shownToStored(double[] shown, double length) {
-        return isReversed(currentRoom) ? new double[]{length - shown[1], length - shown[0]} : shown.clone();
+        return isShownReversed(currentRoom) ? new double[]{length - shown[1], length - shown[0]} : shown.clone();
     }
 
     private interface SideSegmentsEdit {
@@ -1210,14 +1225,14 @@ public class SideEndsPanel extends JPanel {
                     case 1:
                         return formatSideLength(row);
                     default: {
-                        double[] sp = workingStartPoints.get(currentRoom);
-                        int startSide = sp != null ? (int) Math.round(sp[0]) : 0;
+                        double[] sp = startPoint(currentRoom);
+                        int startSide = (int) Math.round(sp[0]);
                         if (row != startSide) {
                             return "\u2014";
                         }
                         double length = SideModel.length(sidePolylines.get(currentRoom).get(row));
-                        double nativeDist = sp != null ? sp[1] : (isReversed(currentRoom) ? length : 0.0);
-                        double shown = isReversed(currentRoom) ? (length - nativeDist) : nativeDist;
+                        double nativeDist = sp[1];
+                        double shown = isShownReversed(currentRoom) ? (length - nativeDist) : nativeDist;
                         return String.format("%.1f cm", Math.max(0.0, Math.min(length, shown)));
                     }
                 }
@@ -1267,7 +1282,7 @@ public class SideEndsPanel extends JPanel {
             if (dialogMode == DIALOG_START_POINT) {
                 double nativeAt = positionAlong(side, e.getPoint());
                 double len = SideModel.length(sidePolylines.get(currentRoom).get(side));
-                setType7StartShown(side, isReversed(currentRoom) ? (len - nativeAt) : nativeAt);
+                setType7StartShown(side, isShownReversed(currentRoom) ? (len - nativeAt) : nativeAt);
                 return;
             }
             // 2. Interactive stretch picking mode in DIALOG_SEGMENTS
@@ -1433,7 +1448,7 @@ public class SideEndsPanel extends JPanel {
             List<float[][]> sides = sidePolylines.get(currentRoom);
             int n = sides != null ? sides.size() : 0;
             SurroundConfig.SideEnds ends = working.get(currentRoom);
-            boolean reversed = isReversed(currentRoom);
+            boolean reversed = isShownReversed(currentRoom);
             boolean anySelected = table.getSelectedRowCount() > 0;
             boolean segmentsMode = dialogMode == DIALOG_SEGMENTS;
             List<List<double[]>> allHints = segmentsMode ? obstacleHints(currentRoom) : Collections.emptyList();
@@ -1522,10 +1537,10 @@ public class SideEndsPanel extends JPanel {
 
             // Type 7 start marker in DIALOG_START_POINT
             if (dialogMode == DIALOG_START_POINT && n > 0) {
-                double[] sp = workingStartPoints.get(currentRoom);
-                int sSide = sp != null ? Math.max(0, Math.min(n - 1, (int) Math.round(sp[0]))) : 0;
+                double[] sp = startPoint(currentRoom);
+                int sSide = Math.max(0, Math.min(n - 1, (int) Math.round(sp[0])));
                 float[][] poly = sides.get(sSide);
-                marker(g2, poly, sp != null ? sp[1] : (reversed ? SideModel.length(poly) : 0.0));
+                marker(g2, poly, sp[1]);
             }
 
             if (n > 1) {

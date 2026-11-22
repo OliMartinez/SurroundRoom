@@ -1181,20 +1181,39 @@ public class SurroundGeometryEngine {
                 sides.add(new SidePath(backwards, i, true));
             }
             // Rotate the collection so that the starting vertex aligns with the original polygon start
-            int n = points.length;
-            int wanted = ((n - 2) % n + n) % n;
+            int first = reversedFirstSide(points, logical);
             int startIndex = 0;
             for (int t = 0; t < sides.size(); t++) {
-                int[] side = logical.get(sides.get(t).index);
-                for (int k = 0; k < side[1]; k++) {
-                    if ((side[0] + k) % n == wanted) {
-                        startIndex = t;
-                    }
+                if (sides.get(t).index == first) {
+                    startIndex = t;
                 }
             }
             Collections.rotate(sides, -startIndex);
         }
+        if (interiorFor(face) && !sides.isEmpty()) {
+            // Inside, the outline is walked from the vertex where it starts outside, so that walked
+            // backwards (in the direction shown) the objects start at the same place
+            int n = points.length;
+            int start = exteriorStartVertex(face, points, logical);
+            for (int t = 0; t < sides.size(); t++) {
+                SidePath side = sides.get(t);
+                int[] ls = logical.get(side.index);
+                if ((side.reversed ? (ls[0] + ls[1]) % n : ls[0]) == start) {
+                    Collections.rotate(sides, -t);
+                    break;
+                }
+            }
+        }
         return sides;
+    }
+
+    /** Returns the index of the point where the exterior traversal of the room starts. */
+    private static int exteriorStartVertex(Room room, float[][] points, List<int[]> logical) {
+        if (!isShownReversed(room)) {
+            return logical.get(0)[0];
+        }
+        int[] first = logical.get(reversedFirstSide(points, logical));
+        return (first[0] + first[1]) % points.length;
     }
 
     /**
@@ -1214,6 +1233,52 @@ public class SurroundGeometryEngine {
     static boolean isTraversalReversed(Room room, boolean interior) {
         boolean clockWise = room.isClockwise();
         return (!clockWise && !interior) || (clockWise && interior);
+    }
+
+    /** Returns the index of the logical side walked first when the points are walked backwards. */
+    private static int reversedFirstSide(float[][] points, List<int[]> logical) {
+        int n = points.length;
+        int wanted = ((n - 2) % n + n) % n;
+        int first = 0;
+        for (int i = 0; i < logical.size(); i++) {
+            int[] side = logical.get(i);
+            for (int k = 0; k < side[1]; k++) {
+                if ((side[0] + k) % n == wanted) {
+                    first = i;
+                }
+            }
+        }
+        return first;
+    }
+
+    /**
+     * Returns the default start of Type 7 as {logical side index, distance from the first point of that side}:
+     * the vertex where the exterior traversal starts, which is also the start used inside.
+     */
+    static double[] defaultType7Start(Room room, boolean mergeCollinear) {
+        float[][] points = room.getPoints();
+        List<int[]> logical = SideModel.logicalSides(points, mergeCollinear);
+        if (logical.isEmpty() || !isShownReversed(room)) {
+            return new double[]{0, 0};
+        }
+        int first = reversedFirstSide(points, logical);
+        return new double[]{first, SideModel.length(SideModel.polyline(points, logical.get(first)))};
+    }
+
+    /**
+     * Whether the points of the room are walked backwards in the direction shown to the user: the one of the
+     * exterior, so that inside and outside the objects follow the outline in the same direction.
+     */
+    static boolean isShownReversed(Room room) {
+        return isTraversalReversed(room, false);
+    }
+
+    /**
+     * Whether the objects of the room go from the end to the start of the traversal: inside, the traversal goes
+     * against the direction shown, so the reverse direction option is inverted there.
+     */
+    private boolean isReverseDirection(Room room) {
+        return activeConfig.reverseDirection != interiorFor(room);
     }
 
     /**
@@ -1824,10 +1889,12 @@ public class SurroundGeometryEngine {
      */
     private void computeCustomSideEnds(Room face, List<SidePath> sides, double[][] margins, int[][] extraObjects) {
         int count = sides.size();
-        int startMode = activeConfig.globalStartEndMode;
-        double startDist = activeConfig.globalStartEndDistance;
-        int endMode = activeConfig.globalEndEndMode;
-        double endDist = activeConfig.globalEndEndDistance;
+        // Inside, the start of a side in the direction shown is the end of its traversal
+        boolean swap = interiorFor(face);
+        int startMode = swap ? activeConfig.globalEndEndMode : activeConfig.globalStartEndMode;
+        double startDist = swap ? activeConfig.globalEndEndDistance : activeConfig.globalStartEndDistance;
+        int endMode = swap ? activeConfig.globalStartEndMode : activeConfig.globalEndEndMode;
+        double endDist = swap ? activeConfig.globalStartEndDistance : activeConfig.globalEndEndDistance;
         double stripDepth = Math.max(0.0, maxSurroundingDepth);
 
         for (int t = 0; t < count; t++) {
@@ -2176,7 +2243,7 @@ public class SurroundGeometryEngine {
             return;
         }
 
-        boolean reverseDir = activeConfig.reverseDirection;
+        boolean reverseDir = isReverseDirection(currentProcessingRoom);
         boolean symmetricEnds = activeConfig.symmetricBothEnds;
 
         // Item 2: Resolve which dimensions adapt in resizing modes (Types 3, 4, and 6)
@@ -2991,7 +3058,7 @@ public class SurroundGeometryEngine {
         SurroundConfig config = activeConfig;
         int count = sides.size();
         int objectCountSetting = config.type7ObjectCount;
-        boolean reverse = config.reverseDirection;
+        boolean reverse = isReverseDirection(face);
 
         // Step 1: Build continuous obstacle-free stretches across all valid sides without clamping at intermediate vertices
         List<double[]> stretches = new ArrayList<>(); // {sideIndexInSides, from, to, isBoundaryStart, isBoundaryEnd, userOffset, sTol, eTol}
@@ -3091,6 +3158,12 @@ public class SurroundGeometryEngine {
                 if (splitIdx >= 0) {
                     List<double[]> rotated = new ArrayList<>();
                     double[] st = stretches.get(splitIdx);
+                    if (splitCoord >= st[2] - EPSILON) {
+                        // At the end of the stretch: the path starts with the next one
+                        splitIdx = (splitIdx + 1) % stretches.size();
+                        st = stretches.get(splitIdx);
+                        splitCoord = st[1];
+                    }
                     if (splitCoord > st[1] + EPSILON && splitCoord < st[2] - EPSILON) {
                         // Split the stretch at splitCoord: second half comes first, first half wraps to the end
                         double eTol = st.length > 7 ? st[7] : 0.0;
@@ -3905,12 +3978,35 @@ public class SurroundGeometryEngine {
         } else if (grad.gradualScope == SurroundRandomSettings.SCOPE_PER_SIDE) {
             // Progression restarts from 0.0 to 1.0 along each individual side group
             for (List<HomePieceOfFurniture> side : sidePlacedGroups.values()) {
-                applyGradualInOrder(side, grad, config.reverseDirection);
+                applyGradualInOrder(inShownOrder(side), grad, config.reverseDirection);
             }
         } else {
             // Global progression: spans sequentially across all placed furniture from first to last
-            applyGradualInOrder(firstLevelPlacedFurniture, grad, config.reverseDirection);
+            applyGradualInOrder(inShownOrder(firstLevelPlacedFurniture), grad, config.reverseDirection);
         }
+    }
+
+    /**
+     * Returns the pieces in the direction shown to the user: the pieces of each interior room, placed
+     * along its traversal, are taken backwards.
+     */
+    private List<HomePieceOfFurniture> inShownOrder(List<HomePieceOfFurniture> pieces) {
+        List<HomePieceOfFurniture> ordered = new ArrayList<>(pieces.size());
+        int i = 0;
+        while (i < pieces.size()) {
+            Room room = pieceRooms.get(pieces.get(i));
+            int j = i;
+            while (j < pieces.size() && pieceRooms.get(pieces.get(j)) == room) {
+                j++;
+            }
+            List<HomePieceOfFurniture> run = new ArrayList<>(pieces.subList(i, j));
+            if (room != null && interiorFor(room)) {
+                Collections.reverse(run);
+            }
+            ordered.addAll(run);
+            i = j;
+        }
+        return ordered;
     }
 
     /**
@@ -3953,6 +4049,12 @@ public class SurroundGeometryEngine {
                 && config.randomSettings != null
                 && config.randomSettings.independentStackRandom
                 && config.randomSettings.hasAny();
+        // Place of each base piece in the direction shown, for the gradual properties of its copies
+        Map<HomePieceOfFurniture, Integer> shownIndices = new IdentityHashMap<>();
+        List<HomePieceOfFurniture> shownOrder = inShownOrder(firstLevelPlacedFurniture);
+        for (int i = 0; i < count; i++) {
+            shownIndices.put(shownOrder.get(i), i);
+        }
         for (int level = 1; level <= config.verticalStackCount; level++) {
             for (int i = 0; i < count; i++) {
                 HomePieceOfFurniture basePiece = firstLevelPlacedFurniture.get(i);
@@ -3979,7 +4081,8 @@ public class SurroundGeometryEngine {
                         double levelT = config.verticalStackCount > 0 ? (double) level / config.verticalStackCount : 1.0;
                         MaterialUtils.applyGradualProperties(stackedCopy, forPiece(grad, isCorner), levelT, level);
                     } else if (independentRandom) {
-                        int idx = config.reverseDirection ? (count - 1 - i) : i;
+                        int shown = shownIndices.get(basePiece);
+                        int idx = config.reverseDirection ? (count - 1 - shown) : shown;
                         MaterialUtils.applyGradualProperties(stackedCopy, forPiece(grad, isCorner),
                                 count > 1 ? (double) idx / (count - 1) : 0.0, idx);
                     }

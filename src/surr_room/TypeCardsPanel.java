@@ -35,8 +35,8 @@ import javax.swing.border.EmptyBorder;
 import javax.swing.border.LineBorder;
 
 /**
- * The seven types as cards in a horizontal strip, each with its picture (type1.png to type7.png); the
- * selected card is highlighted and kept in view, with detailed descriptions provided in tooltips.
+ * The seven types as cards in a horizontal strip, each with its picture (type1.png to type7.png when
+ * surrounding outside, type1_in.png to type7_in.png when surrounding inside); the selected card is highlighted and kept in view, with detailed descriptions provided in tooltips.
  */
 class TypeCardsPanel extends JPanel {
 
@@ -66,6 +66,12 @@ class TypeCardsPanel extends JPanel {
 
     /** List of card panels corresponding to each surrounding type. */
     private final List<JPanel> typeCards = new ArrayList<>();
+
+    /** Picture labels of the cards, in type order. */
+    private final List<JLabel> typeImages = new ArrayList<>();
+
+    /** Whether the pictures currently show the objects placed inside. */
+    private boolean inside;
 
     /** Horizontal scroll pane hosting the card strip. */
     private final JScrollPane cardsScroll;
@@ -123,9 +129,9 @@ class TypeCardsPanel extends JPanel {
         radioButton.setToolTipText(info);
 
         // Load illustration image from bundle resources
-        java.net.URL image = TypeCardsPanel.class.getResource("type" + typeIndex + ".png");
-        JLabel imageLabel = image != null ? new JLabel(new ImageIcon(image)) : new JLabel();
+        JLabel imageLabel = new JLabel(loadTypeImage(typeIndex, false));
         imageLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        typeImages.add(imageLabel);
         imageLabel.setToolTipText(info);
 
         card.add(radioButton, BorderLayout.NORTH);
@@ -146,6 +152,37 @@ class TypeCardsPanel extends JPanel {
         card.putClientProperty("radio", radioButton);
         typeCards.add(card);
         return card;
+    }
+
+    /**
+     * Returns the picture of a type, for objects placed outside or inside.
+     *
+     * @param typeIndex algorithm type index (1-based, 1 to 7)
+     * @param inside    true for the picture with the objects inside
+     * @return the picture, or null if it is missing
+     */
+    private static ImageIcon loadTypeImage(int typeIndex, boolean inside) {
+        java.net.URL image = inside
+                ? TypeCardsPanel.class.getResource("type" + typeIndex + "_in.png")
+                : null;
+        if (image == null) {
+            image = TypeCardsPanel.class.getResource("type" + typeIndex + ".png");
+        }
+        return image != null ? new ImageIcon(image) : null;
+    }
+
+    /**
+     * Shows the pictures for objects placed inside or outside.
+     *
+     * @param inside true when surrounding inside
+     */
+    void setInside(boolean inside) {
+        if (this.inside != inside) {
+            this.inside = inside;
+            for (int i = 0; i < typeImages.size(); i++) {
+                typeImages.get(i).setIcon(loadTypeImage(i + 1, inside));
+            }
+        }
     }
 
     /** Synchronizes visual borders and background colors with the active selection. */

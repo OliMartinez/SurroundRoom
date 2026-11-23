@@ -100,18 +100,35 @@ final class ObjectPicker {
     /** Flag indicating whether the most recent selection event originated from the catalog view. */
     private boolean lastEventFromCatalog;
 
+    /** Flag indicating whether the user picked an object before the dialog closed. */
+    private boolean pickedSuccess;
+
+    /** Whether to temporarily clear Home selection on open and restore it when picking finishes or cancels. */
+    private final boolean clearAndRestoreHomeSelection;
+
+    /** Saved Home selection to restore once corner picking completes or is cancelled. */
+    private List<Selectable> savedHomeSelection;
+
     /**
      * Private constructor initializing the floating dialog, event listeners, and layout.
      *
      * @param homeController the parent HomeController (may be null)
      */
-    private ObjectPicker(Home home, HomeController homeController, UiKit.Texts t, String title,
-            int floors, int walls, Consumer<List<HomePieceOfFurniture>> onPicked) {
+    private ObjectPicker(Window owner, Home home, HomeController homeController, String title,
+            String messageText, String hintText, String summaryText, boolean alwaysOnTop,
+            boolean clearAndRestoreHomeSelection,
+            Consumer<List<HomePieceOfFurniture>> onPicked, Runnable onCancelled) {
         this.home = home;
+        this.clearAndRestoreHomeSelection = clearAndRestoreHomeSelection;
         this.catalogController = homeController != null ? homeController.getFurnitureCatalogController() : null;
-        Window owner = KeyboardFocusManager.getCurrentKeyboardFocusManager().getActiveWindow();
+        if (owner == null) {
+            owner = KeyboardFocusManager.getCurrentKeyboardFocusManager().getActiveWindow();
+        }
         dialog = new JDialog(owner, title, Dialog.ModalityType.MODELESS);
         dialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
+        if (alwaysOnTop) {
+            dialog.setAlwaysOnTop(true);
+        }
         UiKit.applyWindowIcon(dialog);
 
         // Timer debounces rapid clicks and multi-selection marquee drags (300 ms delay)
@@ -135,6 +152,7 @@ final class ObjectPicker {
             }
             // If valid furniture pieces were resolved, conclude picking
             if (!picked.isEmpty()) {
+                pickedSuccess = true;
                 stopListening();
                 dialog.dispose();
                 onPicked.accept(picked);
@@ -170,15 +188,17 @@ final class ObjectPicker {
         JPanel content = new JPanel();
         content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
         content.setBorder(BorderFactory.createEmptyBorder(12, 14, 10, 14));
-        JLabel message = UiKit.subtitle(UiKit.wrap(t.get("pickObjectMessage",
-                "Select, in the plan, the furniture list or the catalog, the object to surround with."), 320));
+        JLabel message = UiKit.subtitle(UiKit.wrap(messageText, 320));
         message.setAlignmentX(0);
         content.add(message);
-        content.add(Box.createVerticalStrut(6));
-        content.add(UiKit.hint(UiKit.wrap(t.get("pickObjectHint",
-                "The settings open once it is selected. If you select two or more objects (with Shift/Ctrl + click or a rectangle), they will be grouped to surround."), 320)));
-        content.add(Box.createVerticalStrut(6));
-        content.add(UiKit.hint(MessageFormat.format(t.get("pickObjectSummary", "Floors: {0}   Walls: {1}"), floors, walls)));
+        if (hintText != null && !hintText.isEmpty()) {
+            content.add(Box.createVerticalStrut(6));
+            content.add(UiKit.hint(UiKit.wrap(hintText, 320)));
+        }
+        if (summaryText != null && !summaryText.isEmpty()) {
+            content.add(Box.createVerticalStrut(6));
+            content.add(UiKit.hint(summaryText));
+        }
         JButton cancel = new JButton(UIManager.getString("OptionPane.cancelButtonText"));
         cancel.addActionListener(e -> dialog.dispose());
         JPanel buttons = UiKit.row(0, cancel);
@@ -196,13 +216,16 @@ final class ObjectPicker {
             @Override
             public void windowClosed(WindowEvent e) {
                 stopListening();
+                if (!pickedSuccess && onCancelled != null) {
+                    onCancelled.run();
+                }
             }
         });
         dialog.pack();
         dialog.setResizable(false);
 
         // Position near top-right corner of the parent application window
-        if (owner != null) {
+        if (owner != null && owner.isShowing()) {
             dialog.setLocation(owner.getX() + owner.getWidth() - dialog.getWidth() - 40, owner.getY() + 90);
         } else {
             dialog.setLocationRelativeTo(null);
@@ -218,8 +241,48 @@ final class ObjectPicker {
     static ObjectPicker show(Home home, HomeController homeController, UserPreferences prefs,
             UiKit.Texts t, String title, int floors, int walls,
             Consumer<List<HomePieceOfFurniture>> onPicked) {
-        ObjectPicker picker = new ObjectPicker(home, homeController, t, title, floors, walls, onPicked);
-        home.addSelectionListener(picker.selectionListener);
+        String msg = t.get("pickObjectMessage",
+                "Select, in the plan, the furniture list or the catalog, the object to surround with.");
+        String hint = t.get("pickObjectHint",
+                "The settings open once it is selected. If you select two or more objects (with Shift/Ctrl + click or a rectangle), they will be grouped to surround.");
+        String summary = MessageFormat.format(t.get("pickObjectSummary", "Floors: {0}   Walls: {1}"), floors, walls);
+        ObjectPicker picker = new ObjectPicker(null, home, homeController, title, msg, hint, summary, false, false, onPicked, null);
+        attachAndShow(picker);
+        return picker;
+    }
+
+    /**
+     * Displays an {@link ObjectPicker} floating dialog to choose a custom corner piece directly from
+     * the Sweet Home 3D plan, furniture list, or catalog. Temporarily clears the plan selection so even
+     * an already-selected piece can be picked in one click, and restores the prior selection on finish/cancel.
+     */
+    static ObjectPicker showForCorner(Window excludeOwner, Home home, HomeController homeController,
+            UiKit.Texts t, String title, Consumer<List<HomePieceOfFurniture>> onPicked, Runnable onCancelled) {
+        Window sh3dOwner = null;
+        for (Window w : Window.getWindows()) {
+            if (w != excludeOwner && w.isShowing() && w instanceof java.awt.Frame) {
+                sh3dOwner = w;
+                break;
+            }
+        }
+        String msg = t.get("pickCornerObjectMessage",
+                "Select, in the plan, the furniture list or the catalog, the object to place at the corners.");
+        String hint = t.get("pickCornerObjectHint",
+                "Click an object in the plan, furniture list or catalog. You can also select multiple objects to group them.");
+        ObjectPicker picker = new ObjectPicker(sh3dOwner, home, homeController, title, msg, hint, null, true, true, onPicked, onCancelled);
+        attachAndShow(picker);
+        return picker;
+    }
+
+    /** Registers Home, Catalog, and global AWT input listeners and makes the picker dialog visible. */
+    private static void attachAndShow(ObjectPicker picker) {
+        if (picker.clearAndRestoreHomeSelection) {
+            picker.savedHomeSelection = new ArrayList<>(picker.home.getSelectedItems());
+            if (!picker.savedHomeSelection.isEmpty()) {
+                picker.home.setSelectedItems(Collections.<Selectable>emptyList());
+            }
+        }
+        picker.home.addSelectionListener(picker.selectionListener);
         if (picker.catalogController != null) {
             try {
                 picker.ignoringCatalogClear = true;
@@ -236,7 +299,6 @@ final class ObjectPicker {
             // If security manager disallows global listener, fallback to immediate selection events
         }
         picker.dialog.setVisible(true);
-        return picker;
     }
 
     /**
@@ -270,6 +332,24 @@ final class ObjectPicker {
                 Toolkit.getDefaultToolkit().removeAWTEventListener(inputListener);
             } catch (SecurityException ex) {
                 // Ignore if security manager prevented adding the listener initially
+            }
+            if (clearAndRestoreHomeSelection && savedHomeSelection != null) {
+                List<Selectable> toRestore = savedHomeSelection;
+                savedHomeSelection = null;
+                Set<Selectable> present = new HashSet<>(home.getSelectableViewableItems());
+                present.addAll(home.getFurniture());
+                present.addAll(home.getRooms());
+                present.addAll(home.getWalls());
+                present.addAll(home.getPolylines());
+                present.addAll(home.getDimensionLines());
+                present.addAll(home.getLabels());
+                List<Selectable> valid = new ArrayList<>(toRestore.size());
+                for (Selectable s : toRestore) {
+                    if (present.contains(s)) {
+                        valid.add(s);
+                    }
+                }
+                home.setSelectedItems(valid);
             }
         }
     }

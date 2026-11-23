@@ -91,8 +91,7 @@ class Type7Panel extends JPanel {
 
         // Header: Distribution mode
         UiKit.addOptionRow(this, row++, 0,
-                UiKit.subtitle(t.get("t7HowMany", "Number of objects")),
-                UiKit.infoIcon(t.get("t7SpreadHint", "Distributed continuously between the first and last vertex, skipping openings and excluded sides.")));
+                UiKit.subtitle(t.get("t7HowMany", "Number of objects")));
         fixedCountRadio = new JRadioButton(t.get("t7FixedCount", "Fixed number:"));
         everyRadio = new JRadioButton(t.get("t7Every", "One every"), true);
         ButtonGroup countGroup = new ButtonGroup();

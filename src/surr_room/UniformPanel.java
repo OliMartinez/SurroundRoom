@@ -76,9 +76,7 @@ class UniformPanel extends JPanel {
         sizeSection = new JPanel(new GridBagLayout());
         int row = 0;
         sameSizeCheckBox = new JCheckBox(t.get("uniformSize", "Same dimensions around the whole outline:"), false);
-        UiKit.addOptionRow(sizeSection, row++, 0, sameSizeCheckBox,
-                UiKit.infoIcon(t.get("uniformSizeHint",
-                        "One size for all the objects; the count of each stretch is computed to cover it without gaps. Type 3 only enlarges; type 4 only reduces.")));
+        UiKit.addOptionRow(sizeSection, row++, 0, sameSizeCheckBox);
 
         sizeOptions = new JPanel(new GridBagLayout());
         int sr = 0;
@@ -88,27 +86,23 @@ class UniformPanel extends JPanel {
         maxSizeChangeSpinner = UiKit.spinner(new SpinnerNumberModel(20.0, 1.0, 90.0, 1.0), 4);
         UiKit.addOptionRow(sizeOptions, sr++, 1,
                 new JLabel(t.get("uniformMaxSizeChange", "Max. size change:")),
-                maxSizeChangeSpinner, new JLabel("%"),
-                UiKit.infoIcon(t.get("uniformMaxSizeChangeTip", "How much larger (type 3) or smaller (type 4) than the original the objects may become.")));
+                maxSizeChangeSpinner, new JLabel("%"));
 
         // Limit: Max % difference between stretches
         maxSizeDifferenceSpinner = UiKit.spinner(new SpinnerNumberModel(1.0, 0.0, 20.0, 0.1), 4);
         UiKit.addOptionRow(sizeOptions, sr++, 1,
-                new JLabel(t.get("uniformMaxSideDifference", "Max. difference between stretches:")),
-                maxSizeDifferenceSpinner, new JLabel("%"),
-                UiKit.infoIcon(t.get("uniformMaxSideDifferenceTip", "Largest difference between the biggest and the smallest object; 1% is imperceptible.")));
+                new JLabel(t.get("uniformMaxSideDifference", "Max. difference between largest and smallest object:")),
+                maxSizeDifferenceSpinner, new JLabel("%"));
 
         // Limit: Max joint between objects
         maxJointSpinner = UiKit.spinner(new SpinnerNumberModel(0.2, 0.0, 5.0, 0.05), 4);
         UiKit.addOptionRow(sizeOptions, sr++, 1,
-                new JLabel(t.get("uniformMaxJoint", "Max. joint between objects:")),
-                maxJointSpinner, new JLabel("cm"),
-                UiKit.infoIcon(t.get("uniformMaxJointTip", "Space shared between objects when changing their size is not enough.")));
+                new JLabel(t.get("uniformMaxJoint", "Max. spacing (joint) between objects:")),
+                maxJointSpinner, new JLabel("cm"));
 
         // Fallback options
         UiKit.addOptionRow(sizeOptions, sr++, 0,
-                UiKit.subtitle(t.get("uniformFallback", "If a stretch exceeds the limits:")),
-                UiKit.infoIcon(t.get("uniformFallbackHint", "When the lengths are not multiples of each other, exactly the same size is not always possible.")));
+                UiKit.subtitle(t.get("uniformFallback", "If a stretch exceeds the limits:")));
         adjustRadio = new JRadioButton(t.get("uniformAdjust", "Adjust size as little as needed (no gaps)"), true);
         centerRadio = new JRadioButton(t.get("uniformCenter", "Keep common size centered"));
         emptyRadio = new JRadioButton(t.get("uniformEmpty", "Leave empty"));
@@ -125,16 +119,13 @@ class UniformPanel extends JPanel {
         gapsSection = new JPanel(new GridBagLayout());
         row = 0;
         sameGapsCheckBox = new JCheckBox(t.get("uniformGaps", "Same spaces around the whole outline:"), false);
-        UiKit.addOptionRow(gapsSection, row++, 0, sameGapsCheckBox,
-                UiKit.infoIcon(t.get("uniformGapsHint",
-                        "The objects keep their size; the count of each stretch is computed so that the spaces (between objects in type 1, at the ends in type 2) are equal.")));
+        UiKit.addOptionRow(gapsSection, row++, 0, sameGapsCheckBox);
 
         gapsOptions = new JPanel(new GridBagLayout());
         maxGapDifferenceSpinner = UiKit.spinner(new SpinnerNumberModel(1.0, 0.0, 100.0, 0.1), 4);
         UiKit.addOptionRow(gapsOptions, 0, 1,
                 new JLabel(t.get("uniformMaxGapDifference", "Max. space difference:")),
-                maxGapDifferenceSpinner, new JLabel("cm"),
-                UiKit.infoIcon(t.get("uniformMaxGapDifferenceTip", "Largest difference between the widest and the narrowest space of the whole outline.")));
+                maxGapDifferenceSpinner, new JLabel("cm"));
         UiKit.addOptionRow(gapsSection, row++, 1, gapsOptions);
 
         // Assemble into main panel

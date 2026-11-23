@@ -8,7 +8,7 @@
  */
 package surr_room;
 
-import com.eteks.sweethome3d.model.CatalogPieceOfFurniture;
+import com.eteks.sweethome3d.model.HomePieceOfFurniture;
 import com.eteks.sweethome3d.model.Room;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -355,8 +355,8 @@ public class SurroundConfig {
     /** Margin around perpendicular corner piece in centimeters. */
     public double cornerPieceMargin = 0.0;
 
-    /** Optional custom furniture model chosen specifically for corner placement. */
-    public CatalogPieceOfFurniture customCornerCatalogPiece = null;
+    /** Optional custom furniture template picked from the plan, furniture list, or catalog for corners. */
+    public HomePieceOfFurniture customCornerPiece = null;
 
     /** Enable per-side custom start and end distance overrides. */
     public boolean customSideEnds = false;

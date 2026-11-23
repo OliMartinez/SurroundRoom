@@ -13,9 +13,11 @@ import com.eteks.sweethome3d.model.UserPreferences;
 import com.eteks.sweethome3d.model.Wall;
 import java.awt.BorderLayout;
 import java.awt.CardLayout;
+import java.awt.Color;
 import java.awt.Component;
 import java.awt.ComponentOrientation;
 import java.awt.Container;
+import java.awt.Cursor;
 import java.awt.Desktop;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
@@ -44,13 +46,16 @@ import java.util.function.Consumer;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
+import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
+import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
+import javax.swing.JToggleButton;
 import javax.swing.KeyStroke;
 import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingUtilities;
@@ -151,23 +156,28 @@ public class SurroundConfigFrame extends JFrame {
     /** Left column container hosting type cards and preview section. */
     private JPanel leftColumn;
 
-    /** Summary label displayed inside the normal preview card. */
-    private JLabel previewSidesSummary;
+    /** Container holding the 2-row toolbar and preview/editor cards (accent-bordered while editing). */
+    private JPanel previewContainer;
 
-    /** Checkbox toggling whether the live preview calculates and displays changes. */
+    /** Checkbox toggling whether objects are calculated and drawn in the preview. */
     final JCheckBox showPreviewCheckBox;
 
-    /** Button in the preview toolbar for selecting sides. */
-    private JButton btnChooseSides;
+    /** Always-visible segmented mode tabs in row 1 of the preview header. */
+    private JToggleButton tabPreview;
+    private JToggleButton tabSides;
+    private JToggleButton tabSegments;
+    private JToggleButton tabStartPoint;
 
-    /** Button in the preview toolbar for selecting excluded stretches. */
-    private JButton btnChooseSegments;
+    /** Optional surface selector shown in row 2 of the preview header when editing multiple faces. */
+    private JPanel surfaceSelectorPanel;
+    private JComboBox<Room> surfaceCombo;
+    private boolean updatingSurfaceCombo = false;
 
-    /** Button in the preview toolbar for selecting the Type 7 starting point. */
-    private JButton btnChooseStartPoint;
+    /** True while one of the embedded editor modes is currently active in {@link #previewCardPanel}. */
+    private boolean editingModeActive = false;
 
-    /** Holds the three editor buttons; hidden while one of the editors is open. */
-    private JPanel editorButtons;
+    /** Active corner object picker dialog, if currently open. */
+    private ObjectPicker cornerPicker;
 
     /** Tracks whether excluded segments are active in the surround configuration. */
     private boolean enableExcludedSegments = false;
@@ -200,7 +210,7 @@ public class SurroundConfigFrame extends JFrame {
         this.baseTargets = targets != null ? new ArrayList<>(targets) : new ArrayList<SurroundTarget>();
         this.targets = new ArrayList<>(this.baseTargets);
         this.defaultHalfObjectLength = Math.max(1.0, defaultHalfObjectLength);
-        this.showPreviewCheckBox = new JCheckBox(texts.get("showLivePreview", "Ver vista previa"), true);
+        this.showPreviewCheckBox = new JCheckBox(texts.get("showLivePreview", "Mostrar objetos en vista previa"), true);
         this.loadingBadgeTimer = new Timer(180, e -> outlinePreview.setLoading(true, texts.get("previewLoading", "Cargando\u2026")));
         this.loadingBadgeTimer.setRepeats(false);
 
@@ -229,6 +239,7 @@ public class SurroundConfigFrame extends JFrame {
                 this::settingsChanged);
         optionsPanel.setOnConfigureRandomProps(() -> showPropsDialog(false));
         optionsPanel.setOnConfigureGradualProps(() -> showPropsDialog(true));
+        optionsPanel.setOnPickCornerObject(this::pickCornerObject);
         type7Section = UiKit.section(texts.get("type7Settings", "Type 7 settings"), type7Panel);
         uniformSection = UiKit.section(texts.get("uniformSettings", "Around the whole outline"), uniformPanel);
 
@@ -250,122 +261,117 @@ public class SurroundConfigFrame extends JFrame {
         JPanel normalPreviewCard = new JPanel(new BorderLayout());
         normalPreviewCard.add(outlinePreview, BorderLayout.CENTER);
 
-        // Preview toolbar containing "See preview" checkbox, side/stretch/start-point buttons, and summary at the top
-        JPanel previewToolbar = new JPanel(new BorderLayout(6, 2));
-        previewToolbar.setBorder(new EmptyBorder(0, 0, 4, 0));
+        // Preview header split cleanly into 2 rows:
+        // Row 1: always-visible mode tabs ([Preview] [Exclude sides (N)] [Exclude stretches (N)] [Start])
+        // Row 2: compact camera & surface bar ([✓] Show objects in preview, Surface combo if multiple, [-] [1:1] [+])
+        JPanel previewHeader = new JPanel();
+        previewHeader.setLayout(new BoxLayout(previewHeader, BoxLayout.Y_AXIS));
+        previewHeader.setOpaque(false);
+        previewHeader.setBorder(new EmptyBorder(0, 0, 4, 0));
 
-        JPanel btnGroup = new JPanel(new FlowLayout(FlowLayout.LEADING, 6, 0));
+        tabPreview = createModeTab(texts.get("livePreview", "Vista previa"), true);
+        tabSides = createModeTab(texts.get("chooseSidesLong", "Excluir lados"), false);
+        tabSegments = createModeTab(texts.get("chooseStretchesLong", "Excluir tramos"), false);
+        tabStartPoint = createModeTab(texts.get("chooseStartPointLong", "Inicio"), false);
+        tabStartPoint.setVisible(false);
+
+        ButtonGroup modeTabGroup = new ButtonGroup();
+        JPanel modeRow = new JPanel(new FlowLayout(FlowLayout.LEADING, 4, 0));
+        modeRow.setOpaque(false);
+        modeRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        boolean hasTargets = !this.targets.isEmpty();
+        for (JToggleButton tab : new JToggleButton[]{tabPreview, tabSides, tabSegments, tabStartPoint}) {
+            modeTabGroup.add(tab);
+            modeRow.add(tab);
+            if (tab != tabPreview) {
+                tab.setEnabled(hasTargets);
+            }
+        }
+        tabPreview.addActionListener(e -> {
+            if (editingModeActive) {
+                commitPendingEditsIfEditing();
+                showNormalPreview();
+            } else {
+                updateModeTabStyles();
+            }
+        });
+        tabSides.addActionListener(e -> switchToEditorMode(SideEndsPanel.DIALOG_SIDES));
+        tabSegments.addActionListener(e -> switchToEditorMode(SideEndsPanel.DIALOG_SEGMENTS));
+        tabStartPoint.addActionListener(e -> switchToEditorMode(SideEndsPanel.DIALOG_START_POINT));
+
+        showPreviewCheckBox.setOpaque(false);
         showPreviewCheckBox.addActionListener(e -> {
             boolean enabled = showPreviewCheckBox.isSelected();
-            outlinePreview.setVisible(enabled);
             if (sideEndsPanel != null) {
                 sideEndsPanel.setLivePreviewEnabled(enabled);
             }
             if (!enabled) {
                 cancelAllPreviewWork();
-                outlinePreview.show(Collections.emptyList(), new SurroundConfig(), Collections.emptyList(), p -> false, 0, 0);
+                outlinePreview.show(currentFaces(), buildConfig(), Collections.emptyList(), p -> false, 0, 0);
             } else {
                 settingsChanged();
             }
-            if (leftColumn != null) {
-                leftColumn.revalidate();
-                leftColumn.repaint();
-            }
         });
 
-        btnChooseSides = new JButton(texts.get("chooseSidesLong", "Seleccionar lados a rodear\u2026"));
-        btnChooseSides.setToolTipText(texts.get("sidesShortHint", "Seleccione los lados que se incluir\u00e1n en el rodeo."));
-        btnChooseSides.addActionListener(e -> startEmbeddedSideEditing(SideEndsPanel.DIALOG_SIDES));
-
-        btnChooseSegments = new JButton(texts.get("chooseStretchesLong", "Seleccionar tramos para no rodear\u2026"));
-        btnChooseSegments.setToolTipText(texts.get("segmentsShortHint", "Seleccione un lado para gestionar sus tramos excluidos."));
-        btnChooseSegments.addActionListener(e -> startEmbeddedSideEditing(SideEndsPanel.DIALOG_SEGMENTS));
-
-        btnChooseStartPoint = new JButton(texts.get("chooseStartPointLong", "Seleccionar inicio\u2026"));
-        btnChooseStartPoint.setToolTipText(texts.get("t7StartShortHint", "Haga clic en el dibujo o indique la distancia donde inicia el tipo 7."));
-        btnChooseStartPoint.addActionListener(e -> startEmbeddedSideEditing(SideEndsPanel.DIALOG_START_POINT));
-        btnChooseStartPoint.setVisible(false);
-
-        boolean hasTargets = !this.targets.isEmpty();
-        btnChooseSides.setEnabled(hasTargets);
-        btnChooseSegments.setEnabled(hasTargets);
-        btnChooseStartPoint.setEnabled(hasTargets);
-
-        JButton btnZoomIn = new JButton("+");
-        btnZoomIn.setMargin(new Insets(1, 6, 1, 6));
-        btnZoomIn.setToolTipText(texts.get("zoomInTip", "Acercar vista previa"));
-        btnZoomIn.addActionListener(e -> {
-            if (sideEndsPanel != null && sideEndsPanel.isVisible()) {
-                sideEndsPanel.zoomIn();
-            } else {
-                outlinePreview.zoomIn();
+        surfaceSelectorPanel = new JPanel(new FlowLayout(FlowLayout.LEADING, 4, 0));
+        surfaceSelectorPanel.setOpaque(false);
+        surfaceSelectorPanel.add(new JLabel(texts.get("sidesRoom", "Superficie:")));
+        surfaceCombo = new JComboBox<>();
+        surfaceCombo.setRenderer(UiKit.renderer(Room.class, this::faceDisplayName, false));
+        surfaceCombo.addActionListener(e -> {
+            if (!updatingSurfaceCombo && sideEndsPanel != null && editingModeActive) {
+                Room selected = (Room) surfaceCombo.getSelectedItem();
+                if (selected != null) {
+                    sideEndsPanel.selectRoom(selected);
+                }
             }
         });
+        surfaceSelectorPanel.add(surfaceCombo);
+        surfaceSelectorPanel.setVisible(false);
 
-        JButton btnZoomOut = new JButton("−");
-        btnZoomOut.setMargin(new Insets(1, 6, 1, 6));
-        btnZoomOut.setToolTipText(texts.get("zoomOutTip", "Alejar vista previa"));
-        btnZoomOut.addActionListener(e -> {
-            if (sideEndsPanel != null && sideEndsPanel.isVisible()) {
-                sideEndsPanel.zoomOut();
-            } else {
-                outlinePreview.zoomOut();
-            }
-        });
+        JButton btnZoomOut = createZoomButton("\u2212", "zoomOutTip", "Alejar vista previa", 6,
+                () -> sideEndsPanel.zoomOut(), outlinePreview::zoomOut);
+        JButton btnZoomReset = createZoomButton("1:1", "zoomResetTip", "Restablecer zoom", 5,
+                () -> sideEndsPanel.resetZoom(), outlinePreview::resetZoom);
+        JButton btnZoomIn = createZoomButton("+", "zoomInTip", "Acercar vista previa", 6,
+                () -> sideEndsPanel.zoomIn(), outlinePreview::zoomIn);
 
-        JButton btnZoomReset = new JButton("1:1");
-        btnZoomReset.setMargin(new Insets(1, 5, 1, 5));
-        btnZoomReset.setToolTipText(texts.get("zoomResetTip", "Restablecer zoom"));
-        btnZoomReset.addActionListener(e -> {
-            if (sideEndsPanel != null && sideEndsPanel.isVisible()) {
-                sideEndsPanel.resetZoom();
-            } else {
-                outlinePreview.resetZoom();
-            }
-        });
+        JPanel cameraRight = new JPanel(new FlowLayout(FlowLayout.TRAILING, 4, 0));
+        cameraRight.setOpaque(false);
+        cameraRight.add(surfaceSelectorPanel);
+        cameraRight.add(btnZoomOut);
+        cameraRight.add(btnZoomReset);
+        cameraRight.add(btnZoomIn);
 
-        btnGroup.add(showPreviewCheckBox);
-        btnGroup.add(btnZoomIn);
-        btnGroup.add(btnZoomOut);
-        btnGroup.add(btnZoomReset);
-        // Editor buttons share one panel so they can be hidden together while an editor is open
-        editorButtons = new JPanel(new FlowLayout(FlowLayout.LEADING, 6, 0));
-        editorButtons.add(btnChooseSides);
-        editorButtons.add(btnChooseSegments);
-        editorButtons.add(btnChooseStartPoint);
-        btnGroup.add(editorButtons);
+        JPanel cameraRow = new JPanel(new BorderLayout(6, 0));
+        cameraRow.setOpaque(false);
+        cameraRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        cameraRow.add(showPreviewCheckBox, BorderLayout.WEST);
+        cameraRow.add(cameraRight, BorderLayout.EAST);
 
-        previewSidesSummary = new JLabel();
-        previewSidesSummary.setForeground(UiKit.HINT_TEXT);
+        previewHeader.add(modeRow);
+        previewHeader.add(Box.createVerticalStrut(4));
+        previewHeader.add(cameraRow);
 
-        previewToolbar.add(btnGroup, BorderLayout.WEST);
-        previewToolbar.add(previewSidesSummary, BorderLayout.EAST);
-
-        // 2. Embedded side, stretch & start-point editor panel
+        // 2. Embedded side, stretch & start-point editor panel (external room selector handled in cameraRow)
         sideEndsPanel = new SideEndsPanel(resource,
                 (result, mode) -> {
-                    if (result != null) {
-                        sideEnds.putAll(result);
-                        if (mode == SideEndsPanel.DIALOG_SEGMENTS) {
-                            enableExcludedSegments = hasAnyExcludedSegments();
-                        } else if (mode == SideEndsPanel.DIALOG_START_POINT) {
-                            type7StartPoints.clear();
-                            type7StartPoints.putAll(sideEndsPanel.getWorkingStartPoints());
-                        }
-                    }
-                    updateSidesSummary();
-                    settingsChanged();
+                    applyEditorResult(result, mode);
                     showNormalPreview();
                 },
                 this::showNormalPreview);
+        sideEndsPanel.setShowInternalRoomBar(false);
+        sideEndsPanel.setRegisterEscapeKey(false);
 
         previewCardPanel.add(normalPreviewCard, "NORMAL");
         previewCardPanel.add(sideEndsPanel, "EDIT");
 
-        // Container holding the toolbar at the top and the preview/editor cards below it
-        JPanel previewContainer = new JPanel(new BorderLayout(0, 4));
-        previewContainer.add(previewToolbar, BorderLayout.NORTH);
+        // Container holding the 2-row header at the top and the preview/editor cards below it
+        previewContainer = new JPanel(new BorderLayout(0, 4));
+        previewContainer.setOpaque(false);
+        previewContainer.add(previewHeader, BorderLayout.NORTH);
         previewContainer.add(previewCardPanel, BorderLayout.CENTER);
+        updateModeTabStyles();
 
         // Left column: Type cards carousel and adaptive preview panel
         leftColumn = new JPanel();
@@ -421,8 +427,18 @@ public class SurroundConfigFrame extends JFrame {
         updateSidesSummary();
 
         applyComponentOrientation(ComponentOrientation.getOrientation(Locale.getDefault()));
-        getRootPane().registerKeyboardAction(e -> dispose(),
-                KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), JComponent.WHEN_IN_FOCUSED_WINDOW);
+        getRootPane().registerKeyboardAction(e -> {
+            if (editingModeActive && sideEndsPanel != null) {
+                if (sideEndsPanel.isPickingInDrawing()) {
+                    sideEndsPanel.cancelPicking();
+                } else {
+                    sideEndsPanel.discardAndClose();
+                }
+            } else {
+                cancelAllPreviewWork();
+                dispose();
+            }
+        }, KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), JComponent.WHEN_IN_FOCUSED_WINDOW);
         fitToScreen();
     }
 
@@ -474,6 +490,8 @@ public class SurroundConfigFrame extends JFrame {
         surroundButton.setFont(surroundButton.getFont().deriveFont(Font.BOLD));
         surroundButton.setMargin(new Insets(4, 22, 4, 22));
         surroundButton.addActionListener(e -> {
+            // Automatically commit any pending edits from the embedded preview editor before surrounding
+            commitPendingEditsIfEditing();
             // Immediately cancel any pending/running preview tasks when applying changes to the home
             cancelAllPreviewWork();
             if (onConfirmCallback != null) {
@@ -492,10 +510,15 @@ public class SurroundConfigFrame extends JFrame {
 
     /** Callback executed when Outside vs. Inside placement mode changes. */
     private void modeChanged() {
+        int activeMode = editingModeActive && sideEndsPanel != null ? sideEndsPanel.getDialogMode() : -1;
+        commitPendingEditsIfEditing();
         typePanel.setInside(modePanel.isInterior());
         syncTargetSideDefaults();
         settingsChanged();
         updateSidesSummary();
+        if (activeMode >= 0) {
+            startEmbeddedSideEditing(activeMode);
+        }
     }
 
     /**
@@ -503,6 +526,8 @@ public class SurroundConfigFrame extends JFrame {
      * Collects previously excluded side midpoints and re-maps them to the newly partitioned sides.
      */
     private void topologyOptionChanged() {
+        int activeMode = editingModeActive && sideEndsPanel != null ? sideEndsPanel.getDialogMode() : -1;
+        commitPendingEditsIfEditing();
         // Capture the midpoints of all currently user-excluded sides so we can preserve them across topology changes!
         List<double[]> excludedMidpoints = collectExcludedSideMidpoints(lastMergeCollinear);
         List<SurroundTarget> previousTargets = this.targets;
@@ -525,6 +550,9 @@ public class SurroundConfigFrame extends JFrame {
         restoreExcludedSidesByMidpoints(excludedMidpoints);
         updateSidesSummary();
         settingsChanged();
+        if (activeMode >= 0) {
+            startEmbeddedSideEditing(activeMode);
+        }
     }
 
     /**
@@ -673,8 +701,13 @@ public class SurroundConfigFrame extends JFrame {
         int selectedType = typePanel.getSelectedType();
         boolean type7 = (selectedType == 7);
         optionsPanel.setSelectedType(selectedType);
-        if (btnChooseStartPoint != null) {
-            btnChooseStartPoint.setVisible(type7);
+        if (tabStartPoint != null) {
+            tabStartPoint.setVisible(type7);
+            if (!type7 && editingModeActive && sideEndsPanel != null
+                    && sideEndsPanel.getDialogMode() == SideEndsPanel.DIALOG_START_POINT) {
+                commitPendingEditsIfEditing();
+                showNormalPreview();
+            }
         }
         type7Section.setVisible(type7);
         type7Section.revalidate();
@@ -685,8 +718,13 @@ public class SurroundConfigFrame extends JFrame {
     /** Triggers debounced recalculation of the live preview whenever any option is modified. */
     private void settingsChanged() {
         updateUniformSection();
+        if (editingModeActive && sideEndsPanel != null) {
+            sideEndsPanel.refreshPreviewConfig(buildConfig());
+        }
         if (showPreviewCheckBox != null && !showPreviewCheckBox.isSelected()) {
-            return; // Do not compute or apply preview updates when live preview is disabled
+            cancelAllPreviewWork();
+            outlinePreview.show(currentFaces(), buildConfig(), Collections.emptyList(), p -> false, 0, 0);
+            return; // Keep geometric plan updated without computing placed furniture
         }
         // Cancel any currently running background engine so new changes supersede it immediately
         SurroundGeometryEngine running = runningPreviewEngine;
@@ -744,6 +782,10 @@ public class SurroundConfigFrame extends JFrame {
 
     @Override
     public void dispose() {
+        if (cornerPicker != null) {
+            cornerPicker.close();
+            cornerPicker = null;
+        }
         cancelAllPreviewWork();
         super.dispose();
     }
@@ -864,42 +906,145 @@ public class SurroundConfigFrame extends JFrame {
         return faces;
     }
 
-    /** Updates the summary label in the preview toolbar displaying excluded sides and stretches. */
+    /** Resolves display name for a single face (used by the surface combo in row 2). */
+    private String faceDisplayName(Room face) {
+        List<Room> faces = currentFaces();
+        List<String> names = currentFaceNames();
+        int idx = faces.indexOf(face);
+        if (idx >= 0 && idx < names.size()) {
+            return names.get(idx);
+        }
+        return face != null && face.getName() != null ? face.getName() : texts.get("sidesRoomDefault", "Surface");
+    }
+
+    /** Updates the integrated counters on the mode tabs in row 1 of the preview header. */
     private void updateSidesSummary() {
         boolean mergeCollinear = modePanel.mergeCollinearCheckBox.isSelected();
-        int skipped = 0;
+        int skipped = 0, customSegs = 0;
         for (Room face : currentFaces()) {
             SurroundConfig.SideEnds ends = sideEnds.get(face);
-            if (ends != null && ends.skipped.length == SideModel.count(face, mergeCollinear)) {
+            if (ends == null) {
+                continue;
+            }
+            if (ends.skipped.length == SideModel.count(face, mergeCollinear)) {
                 skipped += ends.skippedCount();
             }
-        }
-        int customSegs = 0;
-        if (enableExcludedSegments) {
-            for (Room face : currentFaces()) {
-                SurroundConfig.SideEnds ends = sideEnds.get(face);
-                if (ends != null) {
-                    for (List<double[]> list : ends.excludedSegments) {
-                        customSegs += list.size();
-                    }
+            if (enableExcludedSegments) {
+                for (List<double[]> list : ends.excludedSegments) {
+                    customSegs += list.size();
                 }
             }
         }
-        String base;
-        if (skipped == 0 && customSegs == 0) {
-            base = texts.get("sidesAll", "All sides");
-        } else if (skipped > 0 && customSegs == 0) {
-            base = MessageFormat.format(texts.get("sidesSkippedCount", "{0} sides excluded"), skipped);
-        } else if (skipped == 0 && customSegs > 0) {
-            base = MessageFormat.format(texts.get("stretchesExcludedCount", "{0} stretches excluded"), customSegs);
-        } else {
-            base = MessageFormat.format(texts.get("sidesSkippedCount", "{0} sides excluded"), skipped)
-                    + " \u2022 "
-                    + MessageFormat.format(texts.get("stretchesExcludedCount", "{0} stretches excluded"), customSegs);
+        setTabCounter(tabSides, "chooseSidesLong", "Exclude sides", skipped);
+        setTabCounter(tabSegments, "chooseStretchesLong", "Exclude stretches", customSegs);
+        if (tabStartPoint != null) {
+            tabStartPoint.setText(stripEllipsis(texts.get("chooseStartPointLong", "Start")));
         }
-        if (previewSidesSummary != null) {
-            previewSidesSummary.setText(base);
+    }
+
+    /** Formats a mode tab caption with an optional "(N)" counter suffix. */
+    private void setTabCounter(JToggleButton tab, String key, String fallback, int count) {
+        if (tab != null) {
+            String base = stripEllipsis(texts.get(key, fallback));
+            tab.setText(count > 0 ? base + " (" + count + ")" : base);
         }
+    }
+
+    /** Creates a compact preview zoom button wired to either the active editor or the normal preview canvas. */
+    private JButton createZoomButton(String label, String tipKey, String tipFallback, int padX,
+            Runnable onEditing, Runnable onNormal) {
+        JButton btn = new JButton(label);
+        btn.setMargin(new Insets(1, padX, 1, padX));
+        btn.setToolTipText(texts.get(tipKey, tipFallback));
+        btn.addActionListener(e -> {
+            if (sideEndsPanel != null && editingModeActive) {
+                onEditing.run();
+            } else {
+                onNormal.run();
+            }
+        });
+        return btn;
+    }
+
+    /** Strips trailing ellipsis characters so segmented tab labels stay clean and compact. */
+    private static String stripEllipsis(String s) {
+        if (s == null) {
+            return "";
+        }
+        String r = s.trim();
+        while (r.endsWith("\u2026") || r.endsWith(".")) {
+            r = r.substring(0, r.length() - 1).trim();
+        }
+        return r;
+    }
+
+    /** Creates a compact segmented mode toggle button for the preview header strip. */
+    private JToggleButton createModeTab(String text, boolean selected) {
+        JToggleButton btn = new JToggleButton(stripEllipsis(text), selected);
+        btn.setFocusPainted(false);
+        btn.setMargin(new Insets(2, 8, 2, 8));
+        btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        return btn;
+    }
+
+    /** Updates visual emphasis on the four mode tabs and accent border on the preview container. */
+    private void updateModeTabStyles() {
+        JToggleButton[] tabs = {tabPreview, tabSides, tabSegments, tabStartPoint};
+        Color activeBg = new Color(232, 241, 252);
+        for (JToggleButton tab : tabs) {
+            if (tab == null) {
+                continue;
+            }
+            boolean sel = tab.isSelected();
+            tab.setFont(tab.getFont().deriveFont(sel ? Font.BOLD : Font.PLAIN));
+            tab.setForeground(sel ? UiKit.ACCENT.darker() : UIManager.getColor("ToggleButton.foreground"));
+            tab.setBackground(sel ? activeBg : UIManager.getColor("ToggleButton.background"));
+        }
+        if (previewContainer != null) {
+            if (editingModeActive) {
+                previewContainer.setBorder(new CompoundBorder(
+                        BorderFactory.createLineBorder(UiKit.ACCENT, 2),
+                        new EmptyBorder(4, 4, 4, 4)));
+            } else {
+                previewContainer.setBorder(null);
+            }
+            previewContainer.revalidate();
+            previewContainer.repaint();
+        }
+    }
+
+    /** Applies the working copy produced by {@link SideEndsPanel} into frame state. */
+    private void applyEditorResult(Map<Room, SurroundConfig.SideEnds> result, int mode) {
+        if (result != null) {
+            sideEnds.putAll(result);
+            if (mode == SideEndsPanel.DIALOG_SEGMENTS) {
+                enableExcludedSegments = hasAnyExcludedSegments();
+            } else if (mode == SideEndsPanel.DIALOG_START_POINT && sideEndsPanel != null) {
+                type7StartPoints.clear();
+                type7StartPoints.putAll(sideEndsPanel.getWorkingStartPoints());
+            }
+        }
+        updateSidesSummary();
+        settingsChanged();
+    }
+
+    /** Automatically commits pending edits if an embedded editor mode is currently open. */
+    private void commitPendingEditsIfEditing() {
+        if (editingModeActive && sideEndsPanel != null) {
+            applyEditorResult(sideEndsPanel.commitSilently(), sideEndsPanel.getDialogMode());
+        }
+    }
+
+    /** Switches smoothly between editor modes (auto-committing any edits from the previous editor mode). */
+    private void switchToEditorMode(int dialogMode) {
+        if (editingModeActive && sideEndsPanel != null) {
+            if (sideEndsPanel.getDialogMode() == dialogMode) {
+                updateModeTabStyles();
+                return;
+            }
+            commitPendingEditsIfEditing();
+        }
+        startEmbeddedSideEditing(dialogMode);
     }
 
     /** Returns {@code true} if any target room has user-configured excluded stretches. */
@@ -925,25 +1070,66 @@ public class SurroundConfigFrame extends JFrame {
         syncTargetSideDefaults();
         boolean mergeCollinear = modePanel.mergeCollinearCheckBox.isSelected();
         boolean cornerHandlingActive = optionsPanel.enableCornerHandlingCheckBox.isSelected();
+        List<Room> faces = currentFaces();
         sideEndsPanel.setLivePreviewEnabled(showPreviewCheckBox == null || showPreviewCheckBox.isSelected());
-        sideEndsPanel.startEditing(currentFaces(), currentFaceNames(), sideEnds,
+        sideEndsPanel.startEditing(faces, currentFaceNames(), sideEnds,
                 modePanel.isInterior(), alwaysExteriorFaces(), dialogMode, mergeCollinear,
                 defaultHalfObjectLength, cornerHandlingActive);
         sideEndsPanel.setPreviewContext(home, selectedFurniture, buildConfig(), homeObstacles, objectDepth);
-        editorButtons.setVisible(false);
+
+        editingModeActive = true;
+        if (dialogMode == SideEndsPanel.DIALOG_SIDES && tabSides != null) {
+            tabSides.setSelected(true);
+        } else if (dialogMode == SideEndsPanel.DIALOG_SEGMENTS && tabSegments != null) {
+            tabSegments.setSelected(true);
+        } else if (dialogMode == SideEndsPanel.DIALOG_START_POINT && tabStartPoint != null) {
+            tabStartPoint.setSelected(true);
+        }
+
+        // Sync surface selector in row 2 (only visible when editing multiple faces)
+        if (surfaceCombo != null && surfaceSelectorPanel != null) {
+            updatingSurfaceCombo = true;
+            try {
+                surfaceCombo.removeAllItems();
+                for (Room r : faces) {
+                    surfaceCombo.addItem(r);
+                }
+                if (!faces.isEmpty()) {
+                    surfaceCombo.setSelectedIndex(0);
+                }
+            } finally {
+                updatingSurfaceCombo = false;
+            }
+            surfaceSelectorPanel.setVisible(faces.size() > 1);
+        }
+
         previewCardLayout.show(previewCardPanel, "EDIT");
+        updateModeTabStyles();
         previewCardPanel.revalidate();
         previewCardPanel.repaint();
         if (leftColumn != null) {
             leftColumn.revalidate();
             leftColumn.repaint();
         }
+        SwingUtilities.invokeLater(() -> {
+            if (previewContainer != null && previewContainer.isShowing()) {
+                previewContainer.scrollRectToVisible(new Rectangle(0, 0,
+                        previewContainer.getWidth(), previewContainer.getHeight()));
+            }
+        });
     }
 
     /** Restores the bottom preview container to the normal live preview view. */
     private void showNormalPreview() {
-        editorButtons.setVisible(true);
+        editingModeActive = false;
+        if (tabPreview != null) {
+            tabPreview.setSelected(true);
+        }
+        if (surfaceSelectorPanel != null) {
+            surfaceSelectorPanel.setVisible(false);
+        }
         previewCardLayout.show(previewCardPanel, "NORMAL");
+        updateModeTabStyles();
         previewCardPanel.revalidate();
         previewCardPanel.repaint();
         if (leftColumn != null) {
@@ -952,19 +1138,44 @@ public class SurroundConfigFrame extends JFrame {
         }
     }
 
+    /** Launches Sweet Home 3D native picking (plan, furniture list, or catalog) for a custom corner piece. */
+    private void pickCornerObject() {
+        if (home == null) {
+            return;
+        }
+        if (cornerPicker != null) {
+            cornerPicker.close();
+        }
+        setVisible(false);
+        cornerPicker = ObjectPicker.showForCorner(this, home, homeController, texts, getTitle(),
+                picked -> {
+                    cornerPicker = null;
+                    if (picked != null && !picked.isEmpty()) {
+                        com.eteks.sweethome3d.model.HomePieceOfFurniture template = SurroundGeometryEngine.asSingleTemplate(picked);
+                        if (template != null) {
+                            optionsPanel.setCustomCornerPiece(template.clone());
+                        }
+                    }
+                    setVisible(true);
+                    toFront();
+                    settingsChanged();
+                },
+                () -> {
+                    cornerPicker = null;
+                    if (isDisplayable()) {
+                        setVisible(true);
+                        toFront();
+                    }
+                });
+    }
 
-    /** Collects all active template pieces, including custom catalog corner pieces if configured. */
+    /** Collects all active template pieces, including custom corner pieces if configured. */
     private List<com.eteks.sweethome3d.model.HomePieceOfFurniture> collectActiveTemplates() {
         List<com.eteks.sweethome3d.model.HomePieceOfFurniture> templates = new ArrayList<>(selectedFurniture);
         if (optionsPanel.cornerPlaceOrthogonalRadio.isSelected()
                 && optionsPanel.useCatalogCornerCheckBox.isSelected()
-                && optionsPanel.catalogPieceCombo.getSelectedItem() instanceof com.eteks.sweethome3d.model.CatalogPieceOfFurniture) {
-            com.eteks.sweethome3d.model.HomePieceOfFurniture cornerPiece = ObjectPicker.createHomePiece(
-                    (com.eteks.sweethome3d.model.CatalogPieceOfFurniture) optionsPanel.catalogPieceCombo.getSelectedItem(),
-                    homeController);
-            if (cornerPiece != null) {
-                templates.add(cornerPiece);
-            }
+                && optionsPanel.getCustomCornerPiece() != null) {
+            templates.add(optionsPanel.getCustomCornerPiece());
         }
         return templates;
     }

@@ -291,25 +291,12 @@ public final class SurroundRandomDialog {
                     working.enabled.put(p, Boolean.TRUE.equals(val));
                     fireTableRowsUpdated(row, row);
                 } else if (col == 3 && !"look".equals(p)) {
-                    int prev = working.modes.get(p), next = prev;
-                    for (int i = 0; i < modeLabels.length; i++) {
-                        if (modeLabels[i].equals(val)) {
-                            next = i;
-                            break;
-                        }
-                    }
+                    int prev = working.modes.get(p), next = findModeIndex(modeLabels, val, prev);
                     if (next != prev) {
                         working.modes.put(p, next);
-                        if (next == SurroundRandomSettings.MODE_PERCENT) {
-                            working.mins.put(p, gradual ? 80.0 : 100.0);
-                            working.maxs.put(p, gradual ? 120.0 : 100.0);
-                        } else if (next == SurroundRandomSettings.MODE_ADD) {
-                            working.mins.put(p, 0.0);
-                            working.maxs.put(p, gradual ? 20.0 : 0.0);
-                        } else {
-                            working.mins.put(p, 0.0);
-                            working.maxs.put(p, 100.0);
-                        }
+                        working.mins.put(p, next == SurroundRandomSettings.MODE_PERCENT ? (gradual ? 80.0 : 100.0) : 0.0);
+                        working.maxs.put(p, next == SurroundRandomSettings.MODE_PERCENT ? (gradual ? 120.0 : 100.0)
+                                : next == SurroundRandomSettings.MODE_ADD ? (gradual ? 20.0 : 0.0) : 100.0);
                         fireTableRowsUpdated(row, row);
                     }
                 } else if (col == 4 && val instanceof Number) {
@@ -320,11 +307,7 @@ public final class SurroundRandomDialog {
             }
         };
 
-        final JTable table = new JTable(model);
-        table.setRowHeight(26);
-        table.setFillsViewportHeight(true);
-        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        table.putClientProperty("terminateEditOnFocusLost", Boolean.TRUE);
+        final JTable table = createEditableTable(model, 26, true);
 
         checkColumn(table);
         columnWidths(table, 34, gradual ? 165 : 150, 130, 190, 75, 75);
@@ -769,26 +752,11 @@ public final class SurroundRandomDialog {
             @Override
             public void setValueAt(Object val, int r, int c) {
                 if (c == 1) {
-                    int prev = working.modes[r];
-                    int next = prev;
-                    for (int i = 0; i < modeLabels.length; i++) {
-                        if (modeLabels[i].equals(val)) {
-                            next = i;
-                            break;
-                        }
-                    }
+                    int prev = working.modes[r], next = findModeIndex(modeLabels, val, prev);
                     if (next != prev) {
                         working.modes[r] = next;
-                        if (next == SurroundRandomSettings.MODE_PERCENT) {
-                            working.mins[r] = 80.0;
-                            working.maxs[r] = 120.0;
-                        } else if (next == SurroundRandomSettings.MODE_ADD) {
-                            working.mins[r] = -30.0;
-                            working.maxs[r] = 30.0;
-                        } else {
-                            working.mins[r] = 0.0;
-                            working.maxs[r] = 255.0;
-                        }
+                        working.mins[r] = next == SurroundRandomSettings.MODE_PERCENT ? 80.0 : next == SurroundRandomSettings.MODE_ADD ? -30.0 : 0.0;
+                        working.maxs[r] = next == SurroundRandomSettings.MODE_PERCENT ? 120.0 : next == SurroundRandomSettings.MODE_ADD ? 30.0 : 255.0;
                         fireTableDataChanged();
                     }
                 } else if (c == 2 && val instanceof Number) {
@@ -801,10 +769,7 @@ public final class SurroundRandomDialog {
             }
         };
 
-        final JTable compTable = new JTable(compModel);
-        compTable.setRowHeight(24);
-        compTable.setFillsViewportHeight(true);
-        compTable.putClientProperty("terminateEditOnFocusLost", Boolean.TRUE);
+        final JTable compTable = createEditableTable(compModel, 24, false);
 
         DefaultTableCellRenderer compNumRenderer = new DefaultTableCellRenderer() {
             @Override
@@ -843,11 +808,7 @@ public final class SurroundRandomDialog {
         final JCheckBox fromListCheck = new JCheckBox(
                 UiKit.text(resource, "randomFromList", "Draw a color or texture from this list:"), working.fromList);
         final ChoiceTableModel choiceModel = new ChoiceTableModel(resource, working.choices);
-        final JTable choiceTable = new JTable(choiceModel);
-        choiceTable.setRowHeight(26);
-        choiceTable.setFillsViewportHeight(true);
-        choiceTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        choiceTable.putClientProperty("terminateEditOnFocusLost", Boolean.TRUE);
+        final JTable choiceTable = createEditableTable(choiceModel, 26, true);
         choiceTable.getColumnModel().getColumn(0).setMinWidth(32);
         choiceTable.getColumnModel().getColumn(0).setMaxWidth(36);
         choiceTable.getColumnModel().getColumn(0).setCellRenderer(new IconRenderer());
@@ -938,18 +899,16 @@ public final class SurroundRandomDialog {
         JPanel varyBox = new JPanel(new BorderLayout(0, 4));
         JPanel varyNorth = new JPanel();
         varyNorth.setLayout(new BoxLayout(varyNorth, BoxLayout.Y_AXIS));
-        JPanel varyHeader = UiKit.row(4, varyCheck,
-                UiKit.infoIcon(UiKit.text(resource, "randomVaryHint", "A textured material keeps its texture. Values stay within 0\u2013255.")));
-        varyHeader.setAlignmentX(Component.LEFT_ALIGNMENT);
+        varyCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
         sameCheck.setAlignmentX(Component.LEFT_ALIGNMENT);
-        varyNorth.add(varyHeader);
+        varyNorth.add(varyCheck);
         varyNorth.add(sameCheck);
         varyBox.add(varyNorth, BorderLayout.NORTH);
         varyBox.add(compScroll, BorderLayout.CENTER);
 
         JPanel listBox = new JPanel(new BorderLayout(0, 4));
         JPanel listHeader = UiKit.row(4, fromListCheck,
-                UiKit.infoIcon(UiKit.text(resource, "randomListHint", "A double weight comes out twice as often. Only the list applies textures. Colors with \"Vary\" checked also receive the R, G, B variation.")));
+                UiKit.infoIcon(UiKit.text(resource, "randomListHint", "Double weight appears twice as often. Colors with \"Vary\" checked also receive R, G, B variation.")));
         listBox.add(listHeader, BorderLayout.NORTH);
         listBox.add(choiceScroll, BorderLayout.CENTER);
         listBox.add(listButtons, BorderLayout.SOUTH);
@@ -983,20 +942,33 @@ public final class SurroundRandomDialog {
                 JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
         if (res == JOptionPane.OK_OPTION) {
             stopEditing(compTable, choiceTable);
-            look.varyComponents = working.varyComponents;
-            look.sameComponents = working.sameComponents;
-            look.modes = working.modes.clone();
-            look.mins = working.mins.clone();
-            look.maxs = working.maxs.clone();
-            look.fromList = working.fromList;
+            look.copyFrom(working);
             look.initialized = true;
-            look.choices.clear();
-            for (SurroundRandomSettings.RandomLook.Choice c : working.choices) {
-                look.choices.add(c.copy());
-            }
             return true;
         }
         return false;
+    }
+
+    /** Creates a JTable preconfigured with row height, viewport fill, and focus-lost edit commit. */
+    private static JTable createEditableTable(AbstractTableModel model, int rowHeight, boolean singleSelection) {
+        JTable table = new JTable(model);
+        table.setRowHeight(rowHeight);
+        table.setFillsViewportHeight(true);
+        if (singleSelection) {
+            table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        }
+        table.putClientProperty("terminateEditOnFocusLost", Boolean.TRUE);
+        return table;
+    }
+
+    /** Resolves the mode index matching a localized label, or returns {@code fallback}. */
+    private static int findModeIndex(String[] modeLabels, Object val, int fallback) {
+        for (int i = 0; i < modeLabels.length; i++) {
+            if (modeLabels[i].equals(val)) {
+                return i;
+            }
+        }
+        return fallback;
     }
 
     /**
@@ -1349,11 +1321,6 @@ public final class SurroundRandomDialog {
         }
     }
 
-    /** Consumer interface accepting an integer table row index. */
-    private interface IntConsumer {
-        void accept(int row);
-    }
-
     /** Picker interface dynamically selecting the appropriate TableCellEditor for a given row. */
     private interface RowEditorPicker {
         TableCellEditor pick(int row);
@@ -1362,10 +1329,10 @@ public final class SurroundRandomDialog {
     /** TableCellEditor that displays a button launching specialized dialogs upon activation. */
     private static final class ButtonLaunchEditor extends AbstractCellEditor implements TableCellEditor {
         private final JButton button = new JButton();
-        private final IntConsumer onLaunch;
+        private final java.util.function.IntConsumer onLaunch;
         private int currentRow = -1;
 
-        ButtonLaunchEditor(final JTable table, final IntConsumer onLaunch) {
+        ButtonLaunchEditor(final JTable table, final java.util.function.IntConsumer onLaunch) {
             this.onLaunch = onLaunch;
             button.setHorizontalAlignment(SwingConstants.LEFT);
             button.setMargin(new Insets(1, 6, 1, 6));

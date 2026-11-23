@@ -38,7 +38,7 @@ class ModePanel extends JPanel {
         add(intOfRoom);
 
         if (hasOpenWalls) {
-            add(UiKit.infoIcon(t.get("openWallsHint", "Open walls are always surrounded from the outside.")));
+            add(UiKit.hint(t.get("openWallsShortHint", "Open walls: always outside")));
         }
 
         mergeTouchingClosedSetsCheckBox = new JCheckBox(t.get("mergeTouchingClosedSets", "Treat touching closed sets as one"), false);

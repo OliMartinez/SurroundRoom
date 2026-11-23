@@ -711,13 +711,7 @@ public class SurroundTarget {
             if (list.isEmpty()) {
                 loose.add(walls.get(i));
             } else {
-                int root = find(parent, list.get(0));
-                List<Wall> set = sets.get(root);
-                if (set == null) {
-                    set = new ArrayList<>();
-                    sets.put(root, set);
-                }
-                set.add(walls.get(i));
+                sets.computeIfAbsent(find(parent, list.get(0)), k -> new ArrayList<>()).add(walls.get(i));
             }
         }
         List<List<Wall>> result = new ArrayList<>(sets.values());

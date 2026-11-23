@@ -19,6 +19,7 @@ import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
+import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.GridBagConstraints;
@@ -27,15 +28,20 @@ import java.awt.Insets;
 import java.awt.Point;
 import java.awt.RenderingHints;
 import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.geom.Ellipse2D;
 import java.awt.geom.Line2D;
 import java.awt.geom.Path2D;
 import java.awt.geom.Point2D;
+import java.awt.geom.Rectangle2D;
+import java.awt.geom.RoundRectangle2D;
+import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.ResourceBundle;
 import java.util.Set;
@@ -44,13 +50,11 @@ import java.util.function.Consumer;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
-import javax.swing.DefaultListModel;
 import javax.swing.Icon;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
-import javax.swing.JList;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
@@ -61,7 +65,6 @@ import javax.swing.SpinnerNumberModel;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
-import javax.swing.UIManager;
 import javax.swing.border.CompoundBorder;
 import javax.swing.border.EmptyBorder;
 import javax.swing.table.AbstractTableModel;
@@ -198,19 +201,35 @@ public class SideEndsPanel extends JPanel {
     /** 2D interactive canvas. */
     private final RoomPreview preview = new RoomPreview();
 
-    /** Table displaying sides. */
+    /** Whether to render the internal surface combo bar (disabled when host provides one in toolbar). */
+    private boolean showInternalRoomBar = true;
+
+    /** Whether this panel registers its own global ESC shortcut (disabled when embedded in SurroundConfigFrame). */
+    private boolean registerEscapeKey = true;
+
+    /** Table displaying sides (used in DIALOG_SIDES and DIALOG_START_POINT). */
     private final JTable table;
 
     /** Custom table model for sides. */
     private final SidesTableModel tableModel = new SidesTableModel();
 
-    /** List model for excluded intervals of the selected side. */
-    private final DefaultListModel<String> segmentListModel = new DefaultListModel<>();
+    /** Interactive grouped side-and-stretches container shown on the left in DIALOG_SEGMENTS. */
+    private JPanel segmentsTreePanel;
 
-    /** List component for excluded intervals. */
-    private JList<String> segmentList;
+    /** Active side index selected in DIALOG_SEGMENTS. */
+    private int activeSegmentSide = 0;
 
-    /** Interactive drawing-pick state for DIALOG_SEGMENTS ("Seleccionar tramo en el dibujo"). */
+    /** Side and shown-order index of a currently clicked existing stretch in DIALOG_SEGMENTS (-1 if none). */
+    private int selectedSegmentSide = -1;
+    private int selectedSegmentIndex = -1;
+
+    /** Unified numeric inputs for stretch start/end in DIALOG_SEGMENTS (default 0.0 / 0.0, live-synced with drawing). */
+    private JSpinner startSpin;
+    private JSpinner endSpin;
+    private JButton removeSegBtn;
+    private boolean updatingSegmentSpinners = false;
+
+    /** Interactive drawing-pick state for DIALOG_SEGMENTS (also mirrors startSpin / endSpin in real time). */
     private boolean pickingInDrawing = false;
     private int pickSide = -1;
     private double pickPos1 = Double.NaN;
@@ -218,6 +237,13 @@ public class SideEndsPanel extends JPanel {
     private JButton btnPickInDrawing;
     private JButton btnAcceptPick;
     private JButton btnCancelPick;
+
+    /** Live cursor hover readout state on the 2D drawing in DIALOG_SEGMENTS. */
+    private int hoverSide = -1;
+    private double hoverNativePos = Double.NaN;
+    private double hoverWorldX = Double.NaN;
+    private double hoverWorldY = Double.NaN;
+    private Point hoverScreenPt;
 
     /** Spinner for Type 7 start distance in DIALOG_START_POINT mode. */
     private JSpinner startPointSpinner;
@@ -260,7 +286,7 @@ public class SideEndsPanel extends JPanel {
                         setType7StartShown(row, 0.0);
                     }
                 }
-                updateSegmentList();
+                rebuildSegmentsTree();
                 preview.repaint();
             }
         });
@@ -281,25 +307,107 @@ public class SideEndsPanel extends JPanel {
             }
         });
 
-        // Register ESC key to cancel
+        // Register ESC key to cancel (only active when standalone; disabled when embedded in SurroundConfigFrame)
         registerKeyboardAction(e -> {
+            if (!registerEscapeKey) {
+                return;
+            }
             if (pickingInDrawing) {
                 setPickingMode(false);
-            } else if (this.cancelListener != null) {
-                cancelAsyncPreview();
-                this.cancelListener.run();
+            } else {
+                discardAndClose();
             }
         }, KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), JComponent.WHEN_IN_FOCUSED_WINDOW);
 
         setPreferredSize(new Dimension(UiKit.CARD_WIDTH * 4 + UiKit.GAP * 3, 455));
     }
 
+    /** Controls whether the internal room selector bar is displayed (set false when host shows it). */
+    public void setShowInternalRoomBar(boolean show) {
+        this.showInternalRoomBar = show;
+    }
+
+    /** Controls whether this panel handles ESC directly (set false when embedded in SurroundConfigFrame). */
+    public void setRegisterEscapeKey(boolean register) {
+        this.registerEscapeKey = register;
+    }
+
+    /** Returns the active editing mode constant. */
+    public int getDialogMode() {
+        return dialogMode;
+    }
+
+    /** Returns true if interactive two-point stretch picking on the drawing is currently active. */
+    public boolean isPickingInDrawing() {
+        return pickingInDrawing;
+    }
+
+    /** Cancels interactive stretch picking without closing the editor. */
+    public void cancelPicking() {
+        setPickingMode(false);
+    }
+
+    /** Discards working changes and invokes the cancel callback. */
+    public void discardAndClose() {
+        cancelAsyncPreview();
+        if (table.isEditing()) {
+            table.getCellEditor().stopCellEditing();
+        }
+        if (this.cancelListener != null) {
+            this.cancelListener.run();
+        }
+    }
+
+    /** Commits any active cell editing and returns the current working map without closing the panel. */
+    public Map<Room, SurroundConfig.SideEnds> commitSilently() {
+        cancelAsyncPreview();
+        if (table.isEditing()) {
+            table.getCellEditor().stopCellEditing();
+        }
+        return working;
+    }
+
+    /** Switches the currently edited room from an external selector (such as the host toolbar). */
+    public void selectRoom(Room room) {
+        if (room == null || room == currentRoom || !rooms.contains(room)) {
+            return;
+        }
+        if (table.isEditing()) {
+            table.getCellEditor().stopCellEditing();
+        }
+        setPickingMode(false);
+        clearDraftStretch();
+        currentRoom = room;
+        activeSegmentSide = 0;
+        selectedSegmentSide = -1;
+        selectedSegmentIndex = -1;
+        tableModel.fireTableDataChanged();
+        if (table.getRowCount() > 0) {
+            table.setRowSelectionInterval(0, 0);
+        }
+        if (dialogMode == DIALOG_START_POINT) {
+            syncStartPointControls();
+        }
+        rebuildSegmentsTree();
+        validateSidesSelection();
+        triggerAsyncPreview();
+    }
+
+    /** Refreshes the live preview snapshot config while keeping current working edits intact. */
+    public void refreshPreviewConfig(SurroundConfig snapshotConfig) {
+        if (snapshotConfig != null) {
+            this.activeConfig = snapshotConfig;
+            this.obstacleHintsCache.clear();
+            triggerAsyncPreview();
+        }
+    }
+
     @Override
     public Dimension getPreferredSize() {
         int w = UiKit.CARD_WIDTH * 4 + UiKit.GAP * 3;
-        int topH = (rooms.size() > 1 ? 48 : 24);
+        int topH = (showInternalRoomBar && rooms.size() > 1 ? 48 : 24);
         int previewH = 250;
-        int bottomH = (dialogMode == DIALOG_SEGMENTS ? 148 : 94);
+        int bottomH = (dialogMode == DIALOG_SEGMENTS ? 164 : 94);
         int southH = 36;
         int h = topH + previewH + bottomH + southH + 18;
         return new Dimension(w, h);
@@ -380,6 +488,14 @@ public class SideEndsPanel extends JPanel {
         this.pickSide = -1;
         this.pickPos1 = Double.NaN;
         this.pickPos2 = Double.NaN;
+        this.hoverSide = -1;
+        this.hoverNativePos = Double.NaN;
+        this.hoverWorldX = Double.NaN;
+        this.hoverWorldY = Double.NaN;
+        this.hoverScreenPt = null;
+        this.activeSegmentSide = 0;
+        this.selectedSegmentSide = -1;
+        this.selectedSegmentIndex = -1;
 
         sidePolylines.clear();
         working.clear();
@@ -411,7 +527,8 @@ public class SideEndsPanel extends JPanel {
             }
             table.setRowSelectionInterval(selRow, selRow);
         }
-        updateSegmentList();
+        rebuildSegmentsTree();
+        validateSidesSelection();
         triggerAsyncPreview();
     }
 
@@ -523,34 +640,19 @@ public class SideEndsPanel extends JPanel {
     private void buildUi() {
         removeAll();
 
-        // 1. Top bar: Room selector (if multiple rooms) and instruction hints
+        // 1. Top bar: Room selector (only when standalone and multiple rooms) and brief instruction
         JPanel top = new JPanel();
         top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
         top.setOpaque(false);
 
-        if (rooms.size() > 1) {
+        if (showInternalRoomBar && rooms.size() > 1) {
             JPanel roomBar = new JPanel(new FlowLayout(FlowLayout.LEADING, 6, 0));
             roomBar.setOpaque(false);
             roomBar.setAlignmentX(Component.LEFT_ALIGNMENT);
             roomBar.add(new JLabel(text("sidesRoom", "Surface:")));
             JComboBox<Room> combo = new JComboBox<>(rooms.toArray(new Room[0]));
             combo.setRenderer(UiKit.renderer(Room.class, this::roomName, false));
-            combo.addActionListener(e -> {
-                if (table.isEditing()) {
-                    table.getCellEditor().stopCellEditing();
-                }
-                setPickingMode(false);
-                currentRoom = (Room) combo.getSelectedItem();
-                tableModel.fireTableDataChanged();
-                if (table.getRowCount() > 0) {
-                    table.setRowSelectionInterval(0, 0);
-                }
-                if (dialogMode == DIALOG_START_POINT) {
-                    syncStartPointControls();
-                }
-                updateSegmentList();
-                triggerAsyncPreview();
-            });
+            combo.addActionListener(e -> selectRoom((Room) combo.getSelectedItem()));
             roomBar.add(combo);
             top.add(roomBar);
             top.add(Box.createVerticalStrut(3));
@@ -558,49 +660,49 @@ public class SideEndsPanel extends JPanel {
 
         String modeTitle;
         String summaryText;
-        String helpTip;
         if (dialogMode == DIALOG_SEGMENTS) {
             modeTitle = text("segmentsTitle", "Excluded stretches");
             summaryText = text("segmentsShortHint", "Select a side to manage its excluded stretches.");
-            helpTip = text("segmentsDefaultHint", "By default no stretches are excluded; use the buttons or click in the drawing to add them.")
-                    + " " + text("segmentsObstaclesHint", "Click doors/windows (teal), furniture (orange) or overlapping walls/floors (purple) in the drawing to exclude or include them.");
         } else if (dialogMode == DIALOG_START_POINT) {
             modeTitle = text("t7StartTitle", "Starting point (Type 7)");
             summaryText = text("t7StartShortHint", "Click a position on any side in the drawing or set its distance.");
-            helpTip = text("t7StartHelpTip", "The Type 7 distribution starts at the chosen position and follows the traversal direction around the outline.");
         } else {
-            modeTitle = text("sidesTitle", "Sides to surround");
-            summaryText = text("sidesShortHint", "Select the sides to include in the surround.");
-            helpTip = text("sidesClickHint", "Click a side in the drawing or use the table checkboxes to include or exclude it.")
-                    + " " + text("sidesDirectionHint", "The top-left arrow indicates the traversal direction.");
+            modeTitle = text("sidesTitle", "Exclude sides");
+            summaryText = text("sidesShortHint", "Click a side in the drawing or check boxes to exclude sides.");
         }
 
         JLabel titleLabel = new JLabel(modeTitle + " \u2014 ");
         titleLabel.setFont(titleLabel.getFont().deriveFont(Font.BOLD));
-        JPanel hintRow = UiKit.row(4, titleLabel, UiKit.hint(summaryText), UiKit.infoIcon(helpTip));
+        JPanel hintRow = UiKit.row(4, titleLabel, UiKit.hint(summaryText));
         hintRow.setAlignmentX(Component.LEFT_ALIGNMENT);
         top.add(hintRow);
         add(top, BorderLayout.NORTH);
 
-        // 2. Center: 2D preview canvas on top, color classification legend (in segments mode), and controls below
-
-        JScrollPane scroll = new JScrollPane(table);
-        int tableHeight = (dialogMode == DIALOG_SEGMENTS) ? 120 : 90;
-        scroll.setPreferredSize(new Dimension(265, tableHeight));
-
+        // 2. Center: 2D preview canvas on top, controls and legend below
         JPanel bottomControls;
         if (dialogMode == DIALOG_SEGMENTS) {
+            segmentsTreePanel = new JPanel();
+            segmentsTreePanel.setLayout(new BoxLayout(segmentsTreePanel, BoxLayout.Y_AXIS));
+            segmentsTreePanel.setBackground(Color.WHITE);
+            JScrollPane treeScroll = new JScrollPane(segmentsTreePanel);
+            treeScroll.setPreferredSize(new Dimension(285, 126));
+            treeScroll.getVerticalScrollBar().setUnitIncrement(14);
+
             bottomControls = new JPanel(new BorderLayout(8, 4));
             bottomControls.setOpaque(false);
-            bottomControls.add(scroll, BorderLayout.WEST);
+            bottomControls.add(treeScroll, BorderLayout.WEST);
             bottomControls.add(createSegmentsEditorPanel(), BorderLayout.CENTER);
             bottomControls.add(createSegmentsLegendBar(), BorderLayout.SOUTH);
         } else if (dialogMode == DIALOG_START_POINT) {
+            JScrollPane scroll = new JScrollPane(table);
+            scroll.setPreferredSize(new Dimension(265, 90));
             bottomControls = new JPanel(new BorderLayout(8, 0));
             bottomControls.setOpaque(false);
             bottomControls.add(scroll, BorderLayout.WEST);
             bottomControls.add(createStartPointEditorPanel(), BorderLayout.CENTER);
         } else {
+            JScrollPane scroll = new JScrollPane(table);
+            scroll.setPreferredSize(new Dimension(265, 90));
             bottomControls = new JPanel(new BorderLayout(8, 0));
             bottomControls.setOpaque(false);
             bottomControls.add(scroll, BorderLayout.WEST);
@@ -616,12 +718,10 @@ public class SideEndsPanel extends JPanel {
         centerPanel.add(bottomControls, BorderLayout.SOUTH);
         add(centerPanel, BorderLayout.CENTER);
 
-        // 3. Bottom bar: Warning indicator and Action buttons (Cancel / Accept)
+        // 3. Bottom bar: Warning indicator and clearly distinct Apply / Discard buttons
         warningLabel.setForeground(new Color(185, 95, 0));
-        String okText = UIManager.getString("OptionPane.okButtonText", getLocale());
-        String cancelText = UIManager.getString("OptionPane.cancelButtonText", getLocale());
-        btnConfirm.setText(okText != null ? okText : text("accept", "Aceptar"));
-        btnCancel.setText(cancelText != null ? cancelText : text("cancel", "Cancelar"));
+        btnConfirm.setText(text("apply", "Aplicar"));
+        btnCancel.setText(text("discard", "Descartar"));
 
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.TRAILING, 8, 0));
         buttons.setOpaque(false);
@@ -645,15 +745,21 @@ public class SideEndsPanel extends JPanel {
      * explaining what each sub-stretch color represents by category.
      */
     private JPanel createSegmentsLegendBar() {
-        JPanel legend = new JPanel(new FlowLayout(FlowLayout.LEADING, 8, 2));
+        JPanel legend = new JPanel(new FlowLayout(FlowLayout.LEADING, 5, 1));
         legend.setOpaque(false);
-        legend.add(colorSwatchLabel(OutlinePreview.EXCLUDED, text("legendExcluded", "Tramo excluido")));
-        legend.add(colorSwatchLabel(SELECTED_SEG_COLOR, text("legendSelectedSeg", "Seleccionado")));
-        legend.add(colorSwatchLabel(DOOR_HINT, text("legendDoors", "Puertas")));
-        legend.add(colorSwatchLabel(WINDOW_HINT, text("legendWindows", "Ventanas")));
-        legend.add(colorSwatchLabel(COLLISION_HINT, text("legendFurniture", "Muebles")));
-        legend.add(colorSwatchLabel(WALL_OVERLAP_HINT, text("legendWalls", "Paredes que tocan/traslapan")));
-        legend.add(colorSwatchLabel(FLOOR_OVERLAP_HINT, text("legendFloors", "Suelos que traslapan")));
+        JLabel[] items = {
+            colorSwatchLabel(OutlinePreview.EXCLUDED, text("legendExcluded", "Tramo excluido")),
+            colorSwatchLabel(SELECTED_SEG_COLOR, text("legendSelectedSeg", "Seleccionado")),
+            colorSwatchLabel(DOOR_HINT, text("legendDoors", "Puertas")),
+            colorSwatchLabel(WINDOW_HINT, text("legendWindows", "Ventanas")),
+            colorSwatchLabel(COLLISION_HINT, text("legendFurniture", "Muebles")),
+            colorSwatchLabel(WALL_OVERLAP_HINT, text("legendWalls", "Paredes que tocan/traslapan")),
+            colorSwatchLabel(FLOOR_OVERLAP_HINT, text("legendFloors", "Suelos que traslapan"))
+        };
+        for (JLabel item : items) {
+            item.setFont(item.getFont().deriveFont(10.5f));
+            legend.add(item);
+        }
         return legend;
     }
 
@@ -772,22 +878,13 @@ public class SideEndsPanel extends JPanel {
         }
         double len = SideModel.length(polys.get(side));
         double clampedShown = Math.max(0.0, Math.min(len, shownDist));
-        double nativeDist = isShownReversed(currentRoom) ? (len - clampedShown) : clampedShown;
-        workingStartPoints.put(currentRoom, new double[]{side, nativeDist});
+        workingStartPoints.put(currentRoom, new double[]{side, shownToNative(clampedShown, len)});
         updatingStartSpinner = true;
         try {
-            if (table.getSelectedRow() != side) {
-                table.setRowSelectionInterval(side, side);
-            }
             if (startPointSpinner != null) {
                 startPointSpinner.setValue(Math.round(clampedShown * 10.0) / 10.0);
             }
-        } finally {
-            updatingStartSpinner = false;
-        }
-        tableModel.fireTableDataChanged();
-        updatingStartSpinner = true;
-        try {
+            tableModel.fireTableDataChanged();
             table.setRowSelectionInterval(side, side);
         } finally {
             updatingStartSpinner = false;
@@ -820,30 +917,331 @@ public class SideEndsPanel extends JPanel {
         }
     }
 
+    /** Formats a centimeter value concisely (drops trailing .0 when whole). */
+    private static String formatCm(double v) {
+        double r = Math.round(v * 10.0) / 10.0;
+        if (Math.abs(r - Math.rint(r)) < 1e-6) {
+            return String.format(Locale.US, "%.0f", r);
+        }
+        return String.format(Locale.US, "%.1f", r);
+    }
+
+    /** Converts a shown distance (following visual traversal) to native polyline distance. */
+    private double shownToNative(double shown, double length) {
+        return nativeToShown(shown, length);
+    }
+
+    /** Converts a native polyline distance to shown distance (following visual traversal). */
+    private double nativeToShown(double nativeDist, double length) {
+        double clamped = Math.max(0.0, Math.min(length, nativeDist));
+        return isShownReversed(currentRoom) ? (length - clamped) : clamped;
+    }
+
+    /** Maps a stretch index between visual (shown) order and stored order when traversal is reversed. */
+    private int mirrorIndex(int idx, int size) {
+        return isShownReversed(currentRoom) ? (size - 1 - idx) : idx;
+    }
+
+    /** Sets both Desde/Hasta spinners programmatically without triggering recursive listener sync. */
+    private void setSegmentSpinnerValues(double fromShown, double toShown) {
+        if (startSpin == null || endSpin == null) {
+            return;
+        }
+        updatingSegmentSpinners = true;
+        try {
+            startSpin.setValue(Math.round(Math.max(0.0, fromShown) * 10.0) / 10.0);
+            endSpin.setValue(Math.round(Math.max(0.0, toShown) * 10.0) / 10.0);
+        } finally {
+            updatingSegmentSpinners = false;
+        }
+    }
+
+    /** Resets Desde/Hasta spinners to 0.0 / 0.0 and clears provisional pick markers on the drawing. */
+    private void clearDraftStretch() {
+        pickSide = -1;
+        pickPos1 = Double.NaN;
+        pickPos2 = Double.NaN;
+        setSegmentSpinnerValues(0.0, 0.0);
+        if (btnAcceptPick != null) {
+            btnAcceptPick.setEnabled(false);
+        }
+    }
+
+    /** Synchronizes the 2D drawing markers and highlight immediately when the user edits Desde/Hasta. */
+    private void syncDrawingFromSpinners(boolean fromEndSpinner) {
+        if (updatingSegmentSpinners || currentRoom == null || dialogMode != DIALOG_SEGMENTS) {
+            return;
+        }
+        List<float[][]> polys = sidePolylines.get(currentRoom);
+        if (polys == null || polys.isEmpty()) {
+            return;
+        }
+        int side = Math.max(0, Math.min(polys.size() - 1, activeSegmentSide));
+        double len = SideModel.length(polys.get(side));
+        double a = ((Number) startSpin.getValue()).doubleValue();
+        double b = ((Number) endSpin.getValue()).doubleValue();
+        if (a <= 1e-4 && b <= 1e-4) {
+            pickSide = -1;
+            pickPos1 = Double.NaN;
+            pickPos2 = Double.NaN;
+            if (btnAcceptPick != null) {
+                btnAcceptPick.setEnabled(false);
+            }
+        } else if (!fromEndSpinner && b <= 1e-4 && pickingInDrawing && Double.isNaN(pickPos2)) {
+            double ca = Math.max(0.0, Math.min(len, a));
+            pickSide = side;
+            pickPos1 = shownToNative(ca, len);
+            pickPos2 = Double.NaN;
+            if (btnAcceptPick != null) {
+                btnAcceptPick.setEnabled(false);
+            }
+        } else {
+            double ca = Math.max(0.0, Math.min(len, a));
+            double cb = Math.max(0.0, Math.min(len, b));
+            pickSide = side;
+            pickPos1 = shownToNative(ca, len);
+            pickPos2 = shownToNative(cb, len);
+            if (btnAcceptPick != null && pickingInDrawing) {
+                btnAcceptPick.setEnabled(Math.abs(pickPos2 - pickPos1) >= 0.1);
+            }
+        }
+        preview.repaint();
+    }
+
+    /** Enables immediate spinner value commits on each valid keystroke for real-time drawing sync. */
+    private static void enableLiveSpinnerCommits(JSpinner spinner) {
+        javax.swing.JComponent ed = spinner.getEditor();
+        if (ed instanceof JSpinner.DefaultEditor) {
+            javax.swing.JFormattedTextField tf = ((JSpinner.DefaultEditor) ed).getTextField();
+            javax.swing.JFormattedTextField.AbstractFormatter fmt = tf.getFormatter();
+            if (fmt instanceof javax.swing.text.DefaultFormatter) {
+                ((javax.swing.text.DefaultFormatter) fmt).setCommitsOnValidEdit(true);
+            }
+        }
+    }
+
+    /** Selects a side in DIALOG_SEGMENTS, clearing any clicked stretch and resetting Desde/Hasta to 0. */
+    private void selectSegmentSide(int side) {
+        if (currentRoom == null) {
+            return;
+        }
+        List<float[][]> polys = sidePolylines.get(currentRoom);
+        if (polys == null || side < 0 || side >= polys.size()) {
+            return;
+        }
+        activeSegmentSide = side;
+        selectedSegmentSide = -1;
+        selectedSegmentIndex = -1;
+        if (!pickingInDrawing) {
+            clearDraftStretch();
+        }
+        if (removeSegBtn != null) {
+            removeSegBtn.setEnabled(false);
+        }
+        rebuildSegmentsTree();
+        preview.repaint();
+    }
+
+    /** Selects a specific existing excluded stretch from the left interactive list, syncing drawing and inputs. */
+    private void selectExistingStretch(int side, int shownIdx) {
+        if (currentRoom == null) {
+            return;
+        }
+        List<float[][]> polys = sidePolylines.get(currentRoom);
+        SurroundConfig.SideEnds ends = working.get(currentRoom);
+        if (polys == null || ends == null || side < 0 || side >= polys.size() || side >= ends.excludedSegments.size()) {
+            return;
+        }
+        double len = SideModel.length(polys.get(side));
+        List<double[]> shownList = shownSegments(ends.excludedSegments.get(side), len);
+        if (shownIdx < 0 || shownIdx >= shownList.size()) {
+            return;
+        }
+        if (pickingInDrawing) {
+            setPickingMode(false);
+        }
+        activeSegmentSide = side;
+        selectedSegmentSide = side;
+        selectedSegmentIndex = shownIdx;
+        double[] seg = shownList.get(shownIdx);
+        setSegmentSpinnerValues(seg[0], seg[1]);
+        pickSide = side;
+        pickPos1 = shownToNative(seg[0], len);
+        pickPos2 = shownToNative(seg[1], len);
+        if (removeSegBtn != null) {
+            removeSegBtn.setEnabled(true);
+        }
+        rebuildSegmentsTree();
+        preview.repaint();
+    }
+
+    /** Rebuilds the left interactive side-and-stretches list in DIALOG_SEGMENTS (clickable side rows + stretch items). */
+    private void rebuildSegmentsTree() {
+        if (segmentsTreePanel == null || dialogMode != DIALOG_SEGMENTS) {
+            return;
+        }
+        segmentsTreePanel.removeAll();
+        if (currentRoom == null || !sidePolylines.containsKey(currentRoom)) {
+            segmentsTreePanel.revalidate();
+            segmentsTreePanel.repaint();
+            return;
+        }
+        List<float[][]> polys = sidePolylines.get(currentRoom);
+        SurroundConfig.SideEnds ends = working.get(currentRoom);
+        int n = polys.size();
+        if (activeSegmentSide >= n) {
+            activeSegmentSide = Math.max(0, n - 1);
+        }
+        if (selectedSegmentSide >= n) {
+            selectedSegmentSide = -1;
+            selectedSegmentIndex = -1;
+        }
+        String sideWord = text("sidesSide", "Lado");
+        Color activeSideBg = new Color(230, 240, 252);
+        Color segNormalBg = new Color(252, 244, 244);
+        Color segSelBg = new Color(255, 243, 196);
+        Color segSelBorder = new Color(212, 160, 0);
+        Color segNormalBorder = new Color(230, 196, 196);
+
+        for (int i = 0; i < n; i++) {
+            final int sideIdx = i;
+            float[][] poly = polys.get(i);
+            double len = SideModel.length(poly);
+            String lenText = formatCm(len) + " cm" + (poly.length > 2 ? " (" + text("sidesCurve", "curva") + ")" : "");
+            List<double[]> shownSegs = (ends != null && i < ends.excludedSegments.size())
+                    ? shownSegments(ends.excludedSegments.get(i), len) : Collections.<double[]>emptyList();
+            boolean isActiveSide = (i == activeSegmentSide);
+
+            // Clickable side header row
+            JPanel sideRow = new JPanel(new BorderLayout(6, 0));
+            sideRow.setOpaque(true);
+            sideRow.setBackground(isActiveSide ? activeSideBg : (i % 2 == 0 ? Color.WHITE : new Color(248, 250, 252)));
+            sideRow.setBorder(new CompoundBorder(
+                    BorderFactory.createMatteBorder(0, isActiveSide ? 3 : 0, 1, 0, isActiveSide ? ACCENT : new Color(232, 236, 242)),
+                    new EmptyBorder(4, isActiveSide ? 5 : 8, 4, 6)));
+            sideRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+            sideRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+            sideRow.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+
+            JLabel sideLbl = new JLabel(sideWord + " " + (i + 1) + "  (" + lenText + ")");
+            sideLbl.setFont(sideLbl.getFont().deriveFont(isActiveSide ? Font.BOLD : Font.PLAIN, 11.5f));
+            sideLbl.setForeground(ends != null && i < ends.skipped.length && ends.skipped[i]
+                    ? UiKit.HINT_TEXT : (isActiveSide ? ACCENT.darker() : Color.DARK_GRAY));
+            sideRow.add(sideLbl, BorderLayout.CENTER);
+
+            if (!shownSegs.isEmpty()) {
+                JLabel badge = new JLabel(String.valueOf(shownSegs.size()));
+                badge.setFont(badge.getFont().deriveFont(Font.BOLD, 10.5f));
+                badge.setForeground(OutlinePreview.EXCLUDED);
+                sideRow.add(badge, BorderLayout.EAST);
+            }
+            sideRow.addMouseListener(new MouseAdapter() {
+                @Override
+                public void mouseClicked(MouseEvent e) {
+                    selectSegmentSide(sideIdx);
+                }
+            });
+            segmentsTreePanel.add(sideRow);
+
+            // Clickable individual stretch items under this side
+            for (int sIdx = 0; sIdx < shownSegs.size(); sIdx++) {
+                final int segIndex = sIdx;
+                double[] seg = shownSegs.get(sIdx);
+                boolean isSelectedSeg = (i == selectedSegmentSide && sIdx == selectedSegmentIndex);
+
+                JPanel segRow = new JPanel(new BorderLayout(6, 0));
+                segRow.setOpaque(true);
+                segRow.setBackground(isSelectedSeg ? segSelBg : segNormalBg);
+                segRow.setBorder(new CompoundBorder(
+                        new EmptyBorder(2, 16, 2, 6),
+                        new CompoundBorder(
+                                BorderFactory.createLineBorder(isSelectedSeg ? segSelBorder : segNormalBorder, 1),
+                                new EmptyBorder(2, 6, 2, 6))));
+                segRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+                segRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
+                segRow.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+
+                String rangeStr = String.format(Locale.US, "%s \u2013 %s cm", formatCm(seg[0]), formatCm(seg[1]));
+                String lenStr = "(" + formatCm(seg[1] - seg[0]) + " cm)";
+                JLabel segLbl = colorSwatchLabel(isSelectedSeg ? SELECTED_SEG_COLOR : OutlinePreview.EXCLUDED, rangeStr);
+                segLbl.setFont(segLbl.getFont().deriveFont(isSelectedSeg ? Font.BOLD : Font.PLAIN, 11f));
+                segLbl.setForeground(isSelectedSeg ? new Color(110, 72, 0) : new Color(65, 35, 35));
+                JLabel lenLbl = new JLabel(lenStr);
+                lenLbl.setFont(lenLbl.getFont().deriveFont(10.5f));
+                lenLbl.setForeground(UiKit.HINT_TEXT);
+
+                segRow.add(segLbl, BorderLayout.CENTER);
+                segRow.add(lenLbl, BorderLayout.EAST);
+                segRow.addMouseListener(new MouseAdapter() {
+                    @Override
+                    public void mouseClicked(MouseEvent e) {
+                        selectExistingStretch(sideIdx, segIndex);
+                    }
+                });
+                segmentsTreePanel.add(segRow);
+            }
+        }
+        segmentsTreePanel.add(Box.createVerticalGlue());
+        if (removeSegBtn != null) {
+            removeSegBtn.setEnabled(selectedSegmentSide >= 0 && selectedSegmentIndex >= 0);
+        }
+        segmentsTreePanel.revalidate();
+        segmentsTreePanel.repaint();
+    }
+
+    /** Commits the interval from {@code startSpin}/{@code endSpin} to {@code activeSegmentSide} and resets inputs to 0. */
+    private void commitSegmentRange(int side, double native0, double native1) {
+        if (currentRoom == null) {
+            return;
+        }
+        List<float[][]> polys = sidePolylines.get(currentRoom);
+        if (polys == null || side < 0 || side >= polys.size()) {
+            return;
+        }
+        double maxLen = SideModel.length(polys.get(side));
+        double s0 = Math.max(0.0, Math.min(maxLen, Math.min(native0, native1)));
+        double s1 = Math.max(0.0, Math.min(maxLen, Math.max(native0, native1)));
+        if (s1 - s0 < 0.1) {
+            return;
+        }
+        SurroundConfig.SideEnds ends = working.get(currentRoom);
+        ends.excludedSegmentsModifiedByUser = true;
+        List<double[]> segs = ends.excludedSegments.get(side);
+        segs.add(new double[]{s0, s1});
+        SurroundTarget.mergeIntervals(segs);
+        activeSegmentSide = side;
+        selectedSegmentSide = -1;
+        selectedSegmentIndex = -1;
+        clearDraftStretch();
+        rebuildSegmentsTree();
+        triggerAsyncPreview();
+    }
+
     /** Builds the editor sub-panel for managing excluded intervals in segments mode. */
     private JPanel createSegmentsEditorPanel() {
-        JPanel panel = new JPanel(new BorderLayout(0, 3));
-        segmentList = new JList<>(segmentListModel);
-        segmentList.setVisibleRowCount(2);
-        segmentList.addListSelectionListener(e -> {
-            if (!e.getValueIsAdjusting()) {
-                preview.repaint();
-            }
-        });
-        JScrollPane listScroll = new JScrollPane(segmentList);
-        listScroll.setPreferredSize(new Dimension(270, 42));
+        JPanel panel = new JPanel(new BorderLayout(0, 4));
+        panel.setOpaque(false);
 
-        JSpinner startSpin = UiKit.spinner(new SpinnerNumberModel(0.0, 0.0, 100000.0, 1.0), 4);
-        JSpinner endSpin = UiKit.spinner(new SpinnerNumberModel(defaultHalfObjectLength, 0.0, 100000.0, 1.0), 4);
+        // Unified From/To spinners starting at 0.0 / 0.0 (nothing selected by default), live-synced with drawing
+        startSpin = UiKit.spinner(new SpinnerNumberModel(0.0, 0.0, 100000.0, 1.0), 5);
+        endSpin = UiKit.spinner(new SpinnerNumberModel(0.0, 0.0, 100000.0, 1.0), 5);
+        enableLiveSpinnerCommits(startSpin);
+        enableLiveSpinnerCommits(endSpin);
+        startSpin.addChangeListener(e -> syncDrawingFromSpinners(false));
+        endSpin.addChangeListener(e -> syncDrawingFromSpinners(true));
+
         JButton addBtn = new JButton(text("segmentAdd", "A\u00f1adir"));
-        JButton removeBtn = new JButton(text("segmentRemove", "Quitar"));
-        JButton resetEndsBtn = new JButton(text("segmentResetEnds", "Extremos (\u00bd obj.)"));
+        removeSegBtn = new JButton(text("segmentRemove", "Quitar"));
+        removeSegBtn.setEnabled(false);
+        String resetLabel = MessageFormat.format(
+                text("segmentResetEndsCm", "Excluir extremos ({0} cm)"), formatCm(defaultHalfObjectLength));
+        JButton resetEndsBtn = new JButton(resetLabel);
         JButton clearBtn = new JButton(text("segmentClear", "Vaciar"));
 
-        // Interactive drawing selection buttons ("Seleccionar tramo en el dibujo", "Aceptar", "Cancelar")
+        // Interactive drawing selection buttons ("Seleccionar tramo en el dibujo", "Confirmar tramo", "Cancelar tramo")
         btnPickInDrawing = new JButton(text("segmentPickInDrawing", "Seleccionar tramo en el dibujo"));
-        btnAcceptPick = new JButton(text("accept", "Aceptar"));
-        btnCancelPick = new JButton(text("cancel", "Cancelar"));
+        btnAcceptPick = new JButton(text("segmentConfirmPick", "Confirmar tramo"));
+        btnCancelPick = new JButton(text("segmentCancelPick", "Cancelar tramo"));
         btnAcceptPick.setVisible(false);
         btnCancelPick.setVisible(false);
         btnAcceptPick.setEnabled(false);
@@ -853,40 +1251,44 @@ public class SideEndsPanel extends JPanel {
         btnCancelPick.addActionListener(e -> setPickingMode(false));
 
         addBtn.addActionListener(e -> {
-            double a = ((Number) startSpin.getValue()).doubleValue();
-            double b = ((Number) endSpin.getValue()).doubleValue();
-            double s = Math.min(a, b), end = Math.max(a, b);
-            if (end - s < 0.1) {
+            if (currentRoom == null) {
                 return;
             }
-            editSelectedSides((segs, maxLen) -> {
-                double[] stored = shownToStored(new double[]{s, end}, maxLen);
-                double cs = Math.max(0.0, Math.min(maxLen, stored[0]));
-                double ce = Math.max(0.0, Math.min(maxLen, stored[1]));
-                if (ce - cs >= 0.1) {
-                    segs.add(new double[]{cs, ce});
-                    SurroundTarget.mergeIntervals(segs);
-                }
-            });
+            List<float[][]> polys = sidePolylines.get(currentRoom);
+            if (polys == null || polys.isEmpty()) {
+                return;
+            }
+            int side = Math.max(0, Math.min(polys.size() - 1, activeSegmentSide));
+            double maxLen = SideModel.length(polys.get(side));
+            double a = ((Number) startSpin.getValue()).doubleValue();
+            double b = ((Number) endSpin.getValue()).doubleValue();
+            if (Math.abs(b - a) < 0.1) {
+                return;
+            }
+            double[] stored = shownToStored(new double[]{Math.min(a, b), Math.max(a, b)}, maxLen);
+            commitSegmentRange(side, stored[0], stored[1]);
+            if (pickingInDrawing) {
+                setPickingMode(false);
+            }
         });
 
-        removeBtn.addActionListener(e -> {
-            int side = table.getSelectedRow();
-            int idx = segmentList.getSelectedIndex();
-            if (currentRoom != null && side >= 0 && idx >= 0) {
+        removeSegBtn.addActionListener(e -> {
+            if (currentRoom != null && selectedSegmentSide >= 0 && selectedSegmentIndex >= 0) {
                 SurroundConfig.SideEnds ends = working.get(currentRoom);
                 ends.excludedSegmentsModifiedByUser = true;
-                List<double[]> segs = ends.excludedSegments.get(side);
-                if (idx < segs.size()) {
-                    segs.remove(isShownReversed(currentRoom) ? segs.size() - 1 - idx : idx);
-                    tableModel.fireTableRowsUpdated(side, side);
-                    updateSegmentList();
+                List<double[]> segs = ends.excludedSegments.get(selectedSegmentSide);
+                if (selectedSegmentIndex < segs.size()) {
+                    segs.remove(mirrorIndex(selectedSegmentIndex, segs.size()));
+                    selectedSegmentSide = -1;
+                    selectedSegmentIndex = -1;
+                    clearDraftStretch();
+                    rebuildSegmentsTree();
                     triggerAsyncPreview();
                 }
             }
         });
 
-        resetEndsBtn.addActionListener(e -> editSelectedSides((segs, totalLen) -> {
+        resetEndsBtn.addActionListener(e -> editActiveSegmentSide((segs, totalLen) -> {
             segs.clear();
             if (totalLen > 0) {
                 double d = Math.min(defaultHalfObjectLength, totalLen / 2.0);
@@ -899,33 +1301,38 @@ public class SideEndsPanel extends JPanel {
             }
         }));
 
-        clearBtn.addActionListener(e -> editSelectedSides((segs, length) -> segs.clear()));
+        clearBtn.addActionListener(e -> editActiveSegmentSide((segs, length) -> segs.clear()));
 
         JPanel controls = new JPanel(new GridBagLayout());
+        controls.setOpaque(false);
         GridBagConstraints c = new GridBagConstraints();
         c.gridx = 0;
         c.gridy = 0;
         c.anchor = GridBagConstraints.LINE_START;
-        c.insets = new Insets(1, 0, 1, 0);
+        c.insets = new Insets(2, 0, 2, 0);
         controls.add(UiKit.row(3, new JLabel(text("segmentFrom", "Desde:")), startSpin,
                 new JLabel(text("segmentTo", "cm  Hasta:")), endSpin, new JLabel("cm"), addBtn), c);
         c.gridy = 1;
-        controls.add(UiKit.row(3, removeBtn, resetEndsBtn, clearBtn), c);
+        controls.add(UiKit.row(3, removeSegBtn, resetEndsBtn, clearBtn), c);
         c.gridy = 2;
         controls.add(UiKit.row(4, btnPickInDrawing, btnAcceptPick, btnCancelPick), c);
         UiKit.addFiller(controls);
 
-        panel.add(listScroll, BorderLayout.CENTER);
-        panel.add(controls, BorderLayout.SOUTH);
+        panel.add(controls, BorderLayout.CENTER);
         return panel;
     }
 
     /** Activates or deactivates interactive stretch picking directly on the 2D drawing. */
     private void setPickingMode(boolean active) {
         this.pickingInDrawing = active;
-        this.pickSide = -1;
-        this.pickPos1 = Double.NaN;
-        this.pickPos2 = Double.NaN;
+        if (active) {
+            selectedSegmentSide = -1;
+            selectedSegmentIndex = -1;
+            clearDraftStretch();
+            rebuildSegmentsTree();
+        } else {
+            clearDraftStretch();
+        }
         if (btnPickInDrawing != null) {
             btnPickInDrawing.setEnabled(!active);
             btnAcceptPick.setVisible(active);
@@ -946,23 +1353,11 @@ public class SideEndsPanel extends JPanel {
         if (!pickingInDrawing || currentRoom == null || pickSide < 0 || Double.isNaN(pickPos1) || Double.isNaN(pickPos2)) {
             return;
         }
-        double s0 = Math.min(pickPos1, pickPos2);
-        double s1 = Math.max(pickPos1, pickPos2);
-        double maxLen = SideModel.length(sidePolylines.get(currentRoom).get(pickSide));
-        s0 = Math.max(0.0, Math.min(maxLen, s0));
-        s1 = Math.max(0.0, Math.min(maxLen, s1));
-        if (s1 - s0 >= 0.1) {
-            SurroundConfig.SideEnds ends = working.get(currentRoom);
-            ends.excludedSegmentsModifiedByUser = true;
-            List<double[]> segs = ends.excludedSegments.get(pickSide);
-            segs.add(new double[]{s0, s1});
-            SurroundTarget.mergeIntervals(segs);
-            table.setRowSelectionInterval(pickSide, pickSide);
-            tableModel.fireTableRowsUpdated(pickSide, pickSide);
-            updateSegmentList();
-            triggerAsyncPreview();
-        }
+        int targetSide = pickSide;
+        double p1 = pickPos1;
+        double p2 = pickPos2;
         setPickingMode(false);
+        commitSegmentRange(targetSide, p1, p2);
     }
 
     private JButton selectionButton(String text, Consumer<int[]> action) {
@@ -994,6 +1389,10 @@ public class SideEndsPanel extends JPanel {
 
     private void validateSidesSelection() {
         if (currentRoom == null) {
+            return;
+        }
+        if (dialogMode != DIALOG_SIDES) {
+            btnConfirm.setEnabled(true);
             return;
         }
         SurroundConfig.SideEnds ends = working.get(currentRoom);
@@ -1078,7 +1477,12 @@ public class SideEndsPanel extends JPanel {
             excluded.add(new double[]{a, b});
             SurroundTarget.mergeIntervals(excluded);
         }
-        segmentsChanged();
+        activeSegmentSide = side;
+        selectedSegmentSide = -1;
+        selectedSegmentIndex = -1;
+        clearDraftStretch();
+        rebuildSegmentsTree();
+        triggerAsyncPreview();
     }
 
     private List<double[]> shownSegments(List<double[]> stored, double length) {
@@ -1099,43 +1503,23 @@ public class SideEndsPanel extends JPanel {
         void apply(List<double[]> segments, double sideLength);
     }
 
-    private void editSelectedSides(SideSegmentsEdit edit) {
-        if (currentRoom == null || table.getSelectedRowCount() == 0) {
+    private void editActiveSegmentSide(SideSegmentsEdit edit) {
+        if (currentRoom == null) {
             return;
         }
+        List<float[][]> polys = sidePolylines.get(currentRoom);
+        if (polys == null || polys.isEmpty()) {
+            return;
+        }
+        int side = Math.max(0, Math.min(polys.size() - 1, activeSegmentSide));
         SurroundConfig.SideEnds ends = working.get(currentRoom);
         ends.excludedSegmentsModifiedByUser = true;
-        List<float[][]> polys = sidePolylines.get(currentRoom);
-        for (int row : table.getSelectedRows()) {
-            edit.apply(ends.excludedSegments.get(row), SideModel.length(polys.get(row)));
-        }
-        segmentsChanged();
-    }
-
-    private void segmentsChanged() {
-        int[] rows = table.getSelectedRows();
-        for (int row : rows) {
-            tableModel.fireTableRowsUpdated(row, row);
-        }
-        updateSegmentList();
+        edit.apply(ends.excludedSegments.get(side), SideModel.length(polys.get(side)));
+        selectedSegmentSide = -1;
+        selectedSegmentIndex = -1;
+        clearDraftStretch();
+        rebuildSegmentsTree();
         triggerAsyncPreview();
-    }
-
-    private void updateSegmentList() {
-        if (segmentListModel == null) {
-            return;
-        }
-        segmentListModel.clear();
-        int side = table.getSelectedRow();
-        if (currentRoom != null && side >= 0 && dialogMode == DIALOG_SEGMENTS) {
-            SurroundConfig.SideEnds ends = working.get(currentRoom);
-            if (side < ends.excludedSegments.size()) {
-                double length = SideModel.length(sidePolylines.get(currentRoom).get(side));
-                for (double[] s : shownSegments(ends.excludedSegments.get(side), length)) {
-                    segmentListModel.addElement(String.format("%.1f - %.1f cm", s[0], s[1]));
-                }
-            }
-        }
     }
 
     private String roomName(Room room) {
@@ -1146,7 +1530,7 @@ public class SideEndsPanel extends JPanel {
         return room.getName() != null ? room.getName() : text("sidesRoomDefault", "Superficie");
     }
 
-    /** Table model backing the side selection, stretch exclusion, and Type 7 start point tables. */
+    /** Table model backing the side exclusion and Type 7 start point tables. */
     private class SidesTableModel extends AbstractTableModel {
 
         @Override
@@ -1162,14 +1546,7 @@ public class SideEndsPanel extends JPanel {
 
         @Override
         public String getColumnName(int c) {
-            if (dialogMode == DIALOG_SEGMENTS) {
-                String[] cols = {
-                    text("sidesSide", "Lado"),
-                    text("sidesLength", "Longitud (cm)"),
-                    text("segmentsCol", "Tramos excluidos (cm)")
-                };
-                return cols[c];
-            } else if (dialogMode == DIALOG_START_POINT) {
+            if (dialogMode == DIALOG_START_POINT) {
                 String[] cols = {
                     text("sidesSide", "Lado"),
                     text("sidesLength", "Longitud (cm)"),
@@ -1178,7 +1555,7 @@ public class SideEndsPanel extends JPanel {
                 return cols[c];
             }
             String[] cols = {
-                text("sidesSurround", "Incluir"),
+                text("sidesSkipSelected", "Excluir"),
                 text("sidesSide", "Lado"),
                 text("sidesLength", "Longitud (cm)")
             };
@@ -1199,26 +1576,7 @@ public class SideEndsPanel extends JPanel {
         @Override
         public Object getValueAt(int row, int c) {
             SurroundConfig.SideEnds ends = working.get(currentRoom);
-            if (dialogMode == DIALOG_SEGMENTS) {
-                switch (c) {
-                    case 0:
-                        return String.valueOf(row + 1);
-                    case 1:
-                        return formatSideLength(row);
-                    default: {
-                        List<double[]> segs = ends.excludedSegments.get(row);
-                        if (segs.isEmpty()) {
-                            return "\u2014";
-                        }
-                        List<String> parts = new ArrayList<>();
-                        double length = SideModel.length(sidePolylines.get(currentRoom).get(row));
-                        for (double[] s : shownSegments(segs, length)) {
-                            parts.add(String.format("[%.1f - %.1f]", s[0], s[1]));
-                        }
-                        return String.join(", ", parts);
-                    }
-                }
-            } else if (dialogMode == DIALOG_START_POINT) {
+            if (dialogMode == DIALOG_START_POINT) {
                 switch (c) {
                     case 0:
                         return String.valueOf(row + 1);
@@ -1231,15 +1589,13 @@ public class SideEndsPanel extends JPanel {
                             return "\u2014";
                         }
                         double length = SideModel.length(sidePolylines.get(currentRoom).get(row));
-                        double nativeDist = sp[1];
-                        double shown = isShownReversed(currentRoom) ? (length - nativeDist) : nativeDist;
-                        return String.format("%.1f cm", Math.max(0.0, Math.min(length, shown)));
+                        return String.format("%.1f cm", nativeToShown(sp[1], length));
                     }
                 }
             }
             switch (c) {
                 case 0:
-                    return !ends.skipped[row];
+                    return ends.skipped[row];
                 case 1:
                     return String.valueOf(row + 1);
                 default:
@@ -1249,7 +1605,7 @@ public class SideEndsPanel extends JPanel {
 
         @Override
         public boolean isCellEditable(int row, int c) {
-            if (dialogMode == DIALOG_SEGMENTS || dialogMode == DIALOG_START_POINT) {
+            if (dialogMode != DIALOG_SIDES) {
                 return false;
             }
             SurroundConfig.SideEnds ends = working.get(currentRoom);
@@ -1259,18 +1615,71 @@ public class SideEndsPanel extends JPanel {
         @Override
         public void setValueAt(Object value, int row, int c) {
             if (dialogMode == DIALOG_SIDES && c == 0) {
-                setSkipped(new int[]{row}, !Boolean.TRUE.equals(value));
+                setSkipped(new int[]{row}, Boolean.TRUE.equals(value));
             }
         }
     }
 
     /**
      * Drawing of the editor: the preview drawing ({@link OutlinePreview}: fitted view, zoom, pan, floor,
-     * objects and loading badge) of the current face only, with the sides drawn for the mode in use:
-     * selection in every mode, overlaps outside the stretches mode, hints, excluded stretches and picking
-     * in the stretches mode, and the start marker in the type 7 mode. Objects are only computed for the last two.
+     * objects and loading badge) of the current face only, with live cursor X/Y + stretch measurement readout,
+     * on-point position notes, clickable obstacle hints, excluded stretches, and Type 7 start marker.
      */
     private class RoomPreview extends OutlinePreview {
+
+        RoomPreview() {
+            super();
+            MouseAdapter hoverTracker = new MouseAdapter() {
+                @Override
+                public void mouseMoved(MouseEvent e) {
+                    if (dialogMode != DIALOG_SEGMENTS || currentRoom == null) {
+                        if (hoverSide >= 0) {
+                            clearHover();
+                        }
+                        return;
+                    }
+                    int side = sideAt(e.getPoint());
+                    if (side >= 0) {
+                        float[][] poly = sidePolylines.get(currentRoom).get(side);
+                        double nativeAt = positionAlong(side, e.getPoint());
+                        SidePath sp = new SidePath(poly, 0, false);
+                        double[] pt = sp.pointAt(Math.max(0.0, Math.min(sp.length, nativeAt)));
+                        hoverSide = side;
+                        hoverNativePos = nativeAt;
+                        hoverWorldX = pt[0];
+                        hoverWorldY = pt[1];
+                        hoverScreenPt = e.getPoint();
+                        if (!pickingInDrawing) {
+                            setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+                        }
+                        repaint();
+                    } else if (hoverSide >= 0) {
+                        clearHover();
+                    }
+                }
+
+                @Override
+                public void mouseExited(MouseEvent e) {
+                    if (hoverSide >= 0) {
+                        clearHover();
+                    }
+                }
+            };
+            addMouseMotionListener(hoverTracker);
+            addMouseListener(hoverTracker);
+        }
+
+        private void clearHover() {
+            hoverSide = -1;
+            hoverNativePos = Double.NaN;
+            hoverWorldX = Double.NaN;
+            hoverWorldY = Double.NaN;
+            hoverScreenPt = null;
+            if (!pickingInDrawing) {
+                setCursor(Cursor.getDefaultCursor());
+            }
+            repaint();
+        }
 
         @Override
         void clicked(MouseEvent e) {
@@ -1285,17 +1694,26 @@ public class SideEndsPanel extends JPanel {
                 setType7StartShown(side, isShownReversed(currentRoom) ? (len - nativeAt) : nativeAt);
                 return;
             }
-            // 2. Interactive stretch picking mode in DIALOG_SEGMENTS
+            // 2. Interactive stretch picking mode in DIALOG_SEGMENTS (live-synced with Desde / Hasta inputs!)
             if (dialogMode == DIALOG_SEGMENTS && pickingInDrawing) {
                 double nativeAt = positionAlong(side, e.getPoint());
+                double len = SideModel.length(sidePolylines.get(currentRoom).get(side));
+                double shownAt = nativeToShown(nativeAt, len);
                 if (pickSide < 0 || pickSide != side || (!Double.isNaN(pickPos1) && !Double.isNaN(pickPos2))) {
+                    activeSegmentSide = side;
+                    selectedSegmentSide = -1;
+                    selectedSegmentIndex = -1;
                     pickSide = side;
                     pickPos1 = nativeAt;
                     pickPos2 = Double.NaN;
-                    table.setRowSelectionInterval(side, side);
+                    setSegmentSpinnerValues(shownAt, 0.0);
                     btnAcceptPick.setEnabled(false);
+                    rebuildSegmentsTree();
                 } else {
                     pickPos2 = nativeAt;
+                    double shown1 = nativeToShown(pickPos1, len);
+                    double shown2 = nativeToShown(pickPos2, len);
+                    setSegmentSpinnerValues(Math.min(shown1, shown2), Math.max(shown1, shown2));
                     btnAcceptPick.setEnabled(Math.abs(pickPos2 - pickPos1) >= 0.1);
                 }
                 repaint();
@@ -1309,12 +1727,25 @@ public class SideEndsPanel extends JPanel {
                 if (side < allHints.size()) {
                     for (double[] hint : allHints.get(side)) {
                         if (at >= hint[0] - tolerance && at <= hint[1] + tolerance) {
-                            table.setRowSelectionInterval(side, side);
                             toggleExcluded(side, hint);
                             return;
                         }
                     }
                 }
+                // If clicking directly on an existing excluded stretch, select it in the left list and sync inputs
+                SurroundConfig.SideEnds ends = working.get(currentRoom);
+                if (ends != null && side < ends.excludedSegments.size()) {
+                    List<double[]> segs = ends.excludedSegments.get(side);
+                    for (int sIdx = 0; sIdx < segs.size(); sIdx++) {
+                        double[] ex = segs.get(sIdx);
+                        if (at >= ex[0] - tolerance && at <= ex[1] + tolerance) {
+                            selectExistingStretch(side, mirrorIndex(sIdx, segs.size()));
+                            return;
+                        }
+                    }
+                }
+                selectSegmentSide(side);
+                return;
             }
             if (dialogMode == DIALOG_SIDES && !e.isControlDown() && !e.isShiftDown()) {
                 setSkipped(new int[]{side}, !working.get(currentRoom).skipped[side]);
@@ -1411,7 +1842,7 @@ public class SideEndsPanel extends JPanel {
             drawStretch(g2, poly, d0, d1, color, new BasicStroke(width, BasicStroke.CAP_BUTT, BasicStroke.JOIN_ROUND));
         }
 
-        private void marker(Graphics2D g2, float[][] poly, double dist) {
+        private Point2D.Double marker(Graphics2D g2, float[][] poly, double dist) {
             SidePath sp = new SidePath(poly, 0, false);
             double[] pt = sp.pointAt(Math.max(0.0, Math.min(sp.length, dist)));
             Point2D.Double s = toScreen(new float[]{(float) pt[0], (float) pt[1]});
@@ -1420,6 +1851,66 @@ public class SideEndsPanel extends JPanel {
             g2.fill(new Ellipse2D.Double(s.x - r - 1.5, s.y - r - 1.5, 2 * (r + 1.5), 2 * (r + 1.5)));
             g2.setColor(PICK_MARKER_COLOR);
             g2.fill(new Ellipse2D.Double(s.x - r, s.y - r, 2 * r, 2 * r));
+            return s;
+        }
+
+        /** Draws a compact rounded callout pill anchored near (anchorX, anchorY), clamped inside the canvas and avoiding existing pills. */
+        private Rectangle2D.Double drawCallout(Graphics2D g2, double anchorX, double anchorY, double preferredOffsetY,
+                String label, Color bg, Color border, Color fg, List<Rectangle2D.Double> avoid) {
+            Font prevFont = g2.getFont();
+            g2.setFont(prevFont.deriveFont(Font.BOLD, 10.5f));
+            FontMetrics fm = g2.getFontMetrics();
+            int padX = 6, padY = 3;
+            int w = fm.stringWidth(label) + padX * 2;
+            int h = fm.getHeight() + padY * 2 - 2;
+            double x = Math.max(4, Math.min(getWidth() - w - 4, anchorX - w / 2.0));
+            double[] candidateOffsets = preferredOffsetY < 0
+                    ? new double[]{preferredOffsetY, 12, preferredOffsetY - (h + 6), 12 + h + 6}
+                    : new double[]{preferredOffsetY, -(h + 10), preferredOffsetY + h + 6, -(2 * h + 16)};
+            double chosenY = Math.max(4, Math.min(getHeight() - h - 4, anchorY + candidateOffsets[0]));
+            if (avoid != null && !avoid.isEmpty()) {
+                for (double off : candidateOffsets) {
+                    double cy = Math.max(4, Math.min(getHeight() - h - 4, anchorY + off));
+                    Rectangle2D.Double cand = new Rectangle2D.Double(x - 2, cy - 2, w + 4, h + 4);
+                    boolean hits = false;
+                    for (Rectangle2D.Double other : avoid) {
+                        if (cand.intersects(other)) {
+                            hits = true;
+                            break;
+                        }
+                    }
+                    if (!hits) {
+                        chosenY = cy;
+                        break;
+                    }
+                }
+            }
+            RoundRectangle2D.Double box = new RoundRectangle2D.Double(x, chosenY, w, h, 7, 7);
+            g2.setColor(bg);
+            g2.fill(box);
+            g2.setColor(border);
+            g2.setStroke(new BasicStroke(1.1f));
+            g2.draw(box);
+            g2.setColor(fg);
+            g2.drawString(label, (float) (x + padX), (float) (chosenY + padY + fm.getAscent() - 1));
+            g2.setFont(prevFont);
+            Rectangle2D.Double bounds = new Rectangle2D.Double(x, chosenY, w, h);
+            if (avoid != null) {
+                avoid.add(bounds);
+            }
+            return bounds;
+        }
+
+        /** Draws a position note next to a placed stretch point showing distance along side and (X, Y) coordinates. */
+        private void drawPointNote(Graphics2D g2, float[][] poly, double nativeDist, Point2D.Double screenPt,
+                boolean placeBelow, List<Rectangle2D.Double> placedCallouts) {
+            SidePath sp = new SidePath(poly, 0, false);
+            double clamped = Math.max(0.0, Math.min(sp.length, nativeDist));
+            double[] pt = sp.pointAt(clamped);
+            double shown = nativeToShown(clamped, sp.length);
+            String note = formatCm(shown) + " cm (X:" + formatCm(pt[0]) + ", Y:" + formatCm(pt[1]) + ")";
+            drawCallout(g2, screenPt.x, screenPt.y, placeBelow ? 12 : -26,
+                    note, new Color(255, 255, 255, 240), PICK_MARKER_COLOR, new Color(25, 110, 60), placedCallouts);
         }
 
         private void drawTopLeftDirectionArrow(Graphics2D g2, double dirX, double dirY) {
@@ -1441,7 +1932,7 @@ public class SideEndsPanel extends JPanel {
             g2.fill(head);
         }
 
-        /** Objects first, then the sides of the mode in use (selected ones on top), markers, vertices and arrow. */
+        /** Objects first, then the sides of the mode in use (selected ones on top), markers, position notes, vertices and arrow. */
         @Override
         void paintPlan(Graphics2D g2) {
             paintPieces(g2);
@@ -1449,13 +1940,13 @@ public class SideEndsPanel extends JPanel {
             int n = sides != null ? sides.size() : 0;
             SurroundConfig.SideEnds ends = working.get(currentRoom);
             boolean reversed = isShownReversed(currentRoom);
-            boolean anySelected = table.getSelectedRowCount() > 0;
             boolean segmentsMode = dialogMode == DIALOG_SEGMENTS;
+            boolean anySelected = segmentsMode ? (activeSegmentSide >= 0 && activeSegmentSide < n) : (table.getSelectedRowCount() > 0);
             List<List<double[]>> allHints = segmentsMode ? obstacleHints(currentRoom) : Collections.emptyList();
 
             for (int pass = 0; pass < 2; pass++) {
                 for (int i = 0; i < n; i++) {
-                    boolean sel = table.isRowSelected(i);
+                    boolean sel = segmentsMode ? (i == activeSegmentSide) : table.isRowSelected(i);
                     if (sel != (pass == 1)) {
                         continue;
                     }
@@ -1508,12 +1999,12 @@ public class SideEndsPanel extends JPanel {
                     }
                     if (i < ends.excludedSegments.size()) {
                         List<double[]> segs = ends.excludedSegments.get(i);
-                        int selSegIdx = (sel && segmentList != null) ? segmentList.getSelectedIndex() : -1;
-                        int highlightStoredIdx = selSegIdx >= 0 ? (reversed ? segs.size() - 1 - selSegIdx : selSegIdx) : -1;
+                        int highlightStoredIdx = (i == selectedSegmentSide && selectedSegmentIndex >= 0 && selectedSegmentIndex < segs.size())
+                                ? mirrorIndex(selectedSegmentIndex, segs.size()) : -1;
                         for (int sIdx = 0; sIdx < segs.size(); sIdx++) {
                             double[] ex = segs.get(sIdx);
                             if (sIdx == highlightStoredIdx) {
-                                interval(g2, poly, ex[0], ex[1], SELECTED_SEG_COLOR, 8.5f);
+                                interval(g2, poly, ex[0], ex[1], SELECTED_SEG_COLOR, 9.0f);
                             }
                             interval(g2, poly, ex[0], ex[1], EXCLUDED, sel ? 5.2f : 4f);
                         }
@@ -1521,17 +2012,27 @@ public class SideEndsPanel extends JPanel {
                 }
             }
 
-            // Interactive picking markers in DIALOG_SEGMENTS
-            if (segmentsMode && pickingInDrawing && pickSide >= 0 && pickSide < n) {
+            // Track placed callout pill bounds so point notes and hover readout never overlap
+            List<Rectangle2D.Double> placedCallouts = new ArrayList<>(3);
+
+            // Live provisional stretch & point position notes in DIALOG_SEGMENTS (both drawing clicks and Desde/Hasta edits!)
+            if (segmentsMode && pickSide >= 0 && pickSide < n) {
                 float[][] poly = sides.get(pickSide);
-                if (!Double.isNaN(pickPos1) && !Double.isNaN(pickPos2)) {
+                boolean has1 = !Double.isNaN(pickPos1);
+                boolean has2 = !Double.isNaN(pickPos2);
+                if (has1 && has2 && Math.abs(pickPos2 - pickPos1) > 0.05) {
                     interval(g2, poly, Math.min(pickPos1, pickPos2), Math.max(pickPos1, pickPos2), PICK_MARKER_COLOR, 6.0f);
+                } else if (pickingInDrawing && has1 && !has2 && hoverSide == pickSide && !Double.isNaN(hoverNativePos)) {
+                    interval(g2, poly, Math.min(pickPos1, hoverNativePos), Math.max(pickPos1, hoverNativePos),
+                            new Color(PICK_MARKER_COLOR.getRed(), PICK_MARKER_COLOR.getGreen(), PICK_MARKER_COLOR.getBlue(), 150), 5.0f);
                 }
-                if (!Double.isNaN(pickPos1)) {
-                    marker(g2, poly, pickPos1);
+                Point2D.Double s1 = has1 ? marker(g2, poly, pickPos1) : null;
+                Point2D.Double s2 = has2 ? marker(g2, poly, pickPos2) : null;
+                if (s1 != null) {
+                    drawPointNote(g2, poly, pickPos1, s1, false, placedCallouts);
                 }
-                if (!Double.isNaN(pickPos2)) {
-                    marker(g2, poly, pickPos2);
+                if (s2 != null && (!has1 || Math.abs(pickPos2 - pickPos1) > 0.05)) {
+                    drawPointNote(g2, poly, pickPos2, s2, false, placedCallouts);
                 }
             }
 
@@ -1546,7 +2047,9 @@ public class SideEndsPanel extends JPanel {
             if (n > 1) {
                 for (int i = 0; i < n; i++) {
                     Point2D.Double s = toScreen(sides.get(i)[0]);
-                    boolean adjSelected = table.isRowSelected(i) || table.isRowSelected((i - 1 + n) % n);
+                    boolean adjSelected = segmentsMode
+                            ? (i == activeSegmentSide || (i - 1 + n) % n == activeSegmentSide)
+                            : (table.isRowSelected(i) || table.isRowSelected((i - 1 + n) % n));
                     g2.setColor(adjSelected ? ACCENT : new Color(WALL.getRed(), WALL.getGreen(), WALL.getBlue(), anySelected ? 95 : 190));
                     double r = adjSelected ? 3.2 : 2.2;
                     g2.fill(new Ellipse2D.Double(s.x - r, s.y - r, 2 * r, 2 * r));
@@ -1554,14 +2057,37 @@ public class SideEndsPanel extends JPanel {
             }
 
             if (n > 0) {
-                int refSide = table.getSelectedRow();
+                int refSide = segmentsMode ? activeSegmentSide : table.getSelectedRow();
                 for (int i = 0; refSide < 0 && i < n; i++) {
                     if (!ends.skipped[i]) {
                         refSide = i;
                     }
                 }
-                double[] d = middleDirection(sides.get(Math.max(0, refSide)));
+                double[] d = middleDirection(sides.get(Math.max(0, Math.min(n - 1, refSide))));
                 drawTopLeftDirectionArrow(g2, reversed ? -d[0] : d[0], reversed ? -d[1] : d[1]);
+            }
+
+            // Live cursor X/Y + side position + real-time stretch measurement readout in DIALOG_SEGMENTS
+            if (segmentsMode && hoverSide >= 0 && hoverSide < n && hoverScreenPt != null && !Double.isNaN(hoverNativePos)) {
+                float[][] poly = sides.get(hoverSide);
+                double len = SideModel.length(poly);
+                double shown = nativeToShown(hoverNativePos, len);
+                StringBuilder sb = new StringBuilder();
+                sb.append("X:").append(formatCm(hoverWorldX))
+                  .append(" Y:").append(formatCm(hoverWorldY))
+                  .append("  \u00b7  ").append(text("sidesSide", "Lado")).append(' ').append(hoverSide + 1)
+                  .append(": ").append(formatCm(shown)).append(" cm");
+                if (pickingInDrawing && pickSide == hoverSide && !Double.isNaN(pickPos1) && Double.isNaN(pickPos2)) {
+                    double measured = Math.abs(hoverNativePos - pickPos1);
+                    sb.append("  \u00b7  ").append(text("segmentMeasuredLen", "Medida")).append(": ")
+                      .append(formatCm(measured)).append(" cm");
+                }
+                // Small hover dot projected onto the side
+                Point2D.Double proj = toScreen(new float[]{(float) hoverWorldX, (float) hoverWorldY});
+                g2.setColor(ACCENT);
+                g2.fill(new Ellipse2D.Double(proj.x - 3.0, proj.y - 3.0, 6.0, 6.0));
+                drawCallout(g2, hoverScreenPt.x, hoverScreenPt.y, -28,
+                        sb.toString(), new Color(32, 41, 56, 228), new Color(18, 24, 34), Color.WHITE, placedCallouts);
             }
         }
     }

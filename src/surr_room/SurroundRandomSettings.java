@@ -180,65 +180,45 @@ public class SurroundRandomSettings {
          */
         public int varyColor(int rgb, Random rng) {
             int[] parts = {(rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF};
-            Double sharedDraw = sameComponents ? drawComponent(0, parts[0], rng) : null;
+            double sharedDraw = sameComponents ? drawComponent(0, rng) : 0;
+            boolean zeroShared = sameComponents && mins[0] == 0 && maxs[0] == 0;
             for (int c = 0; c < 3; c++) {
-                double next;
-                if (sameComponents) {
-                    double lo = Math.min(mins[0], maxs[0]);
-                    double hi = Math.max(mins[0], maxs[0]);
-                    if (modes[0] == MODE_VALUE) {
-                        next = sharedDraw;
-                    } else if (modes[0] == MODE_ADD) {
-                        next = parts[c] + sharedDraw;
-                    } else {
-                        next = parts[c] * (sharedDraw / 100.0);
-                    }
-                    if (lo == 0 && hi == 0) {
-                        next = parts[c];
-                    }
-                } else {
-                    next = applyComponent(c, parts[c], rng);
-                }
+                double next = sameComponents
+                        ? (zeroShared ? parts[c] : applyMode(modes[0], parts[c], sharedDraw))
+                        : applyMode(modes[c], parts[c], drawComponent(c, rng));
                 parts[c] = Math.max(0, Math.min(255, (int) Math.round(next)));
             }
             return (parts[0] << 16) | (parts[1] << 8) | parts[2];
         }
 
         /** Generates a random delta for color component c. */
-        private double drawComponent(int c, int current, Random rng) {
-            double lo = Math.min(mins[c], maxs[c]);
-            double hi = Math.max(mins[c], maxs[c]);
+        private double drawComponent(int c, Random rng) {
+            double lo = Math.min(mins[c], maxs[c]), hi = Math.max(mins[c], maxs[c]);
             return lo + (hi - lo) * rng.nextDouble();
-        }
-
-        /** Applies component delta using the configured mode. */
-        private double applyComponent(int c, int current, Random rng) {
-            double d = drawComponent(c, current, rng);
-            if (modes[c] == MODE_VALUE) {
-                return d;
-            } else if (modes[c] == MODE_ADD) {
-                return current + d;
-            } else {
-                return current * (d / 100.0);
-            }
         }
 
         /** Deep clone of RandomLook. */
         public RandomLook copy() {
             RandomLook copy = new RandomLook();
-            copy.varyComponents = varyComponents;
-            copy.sameComponents = sameComponents;
-            copy.modes = modes.clone();
-            copy.mins = mins.clone();
-            copy.maxs = maxs.clone();
-            copy.fromList = fromList;
-            copy.initialized = initialized;
-            copy.startColor = startColor;
-            copy.endColor = endColor;
-            for (Choice c : choices) {
-                copy.choices.add(c.copy());
-            }
+            copy.copyFrom(this);
             return copy;
+        }
+
+        /** Copies all look fields and weighted choices from another instance. */
+        public void copyFrom(RandomLook src) {
+            varyComponents = src.varyComponents;
+            sameComponents = src.sameComponents;
+            modes = src.modes.clone();
+            mins = src.mins.clone();
+            maxs = src.maxs.clone();
+            fromList = src.fromList;
+            initialized = src.initialized;
+            startColor = src.startColor;
+            endColor = src.endColor;
+            choices.clear();
+            for (Choice c : src.choices) {
+                choices.add(c.copy());
+            }
         }
     }
 
@@ -300,27 +280,29 @@ public class SurroundRandomSettings {
             materials.put(prop, new LinkedHashSet<String>());
             pieceMaterials.put(prop, new IdentityHashMap<HomePieceOfFurniture, Set<String>>());
             if ("shininess".equals(prop) || "light_power".equals(prop)) {
-                modes.put(prop, MODE_VALUE);
-                mins.put(prop, 0.0);
-                maxs.put(prop, 100.0);
+                setDefaults(prop, MODE_VALUE, 0.0, 100.0);
             } else if ("height".equals(prop) || "depth".equals(prop)) {
-                modes.put(prop, MODE_PERCENT);
-                mins.put(prop, 85.0);
-                maxs.put(prop, 115.0);
+                setDefaults(prop, MODE_PERCENT, 85.0, 115.0);
             } else if ("elevation".equals(prop)) {
-                modes.put(prop, MODE_ADD);
-                mins.put(prop, 0.0);
-                maxs.put(prop, 20.0);
+                setDefaults(prop, MODE_ADD, 0.0, 20.0);
             } else if ("pitch".equals(prop) || "roll".equals(prop) || "angle_jitter".equals(prop)) {
-                modes.put(prop, MODE_ADD);
-                mins.put(prop, -5.0);
-                maxs.put(prop, 5.0);
+                setDefaults(prop, MODE_ADD, -5.0, 5.0);
             } else {
-                modes.put(prop, MODE_ADD);
-                mins.put(prop, 0.0);
-                maxs.put(prop, 0.0);
+                setDefaults(prop, MODE_ADD, 0.0, 0.0);
             }
         }
+    }
+
+    /** Assigns initial mode and bounds for a registered property. */
+    private void setDefaults(String prop, int mode, double min, double max) {
+        modes.put(prop, mode);
+        mins.put(prop, min);
+        maxs.put(prop, max);
+    }
+
+    /** Applies a value using the specified modification mode (absolute, additive, or percentage). */
+    private static double applyMode(int mode, double current, double value) {
+        return mode == MODE_VALUE ? value : mode == MODE_ADD ? current + value : current * (value / 100.0);
     }
 
     /** Checks if a property supports fine-grained sub-material targeting (shininess and look). */
@@ -331,57 +313,40 @@ public class SurroundRandomSettings {
     /** Retrieves the set of materials targeted for a specific piece of furniture. */
     public Set<String> materialsForPiece(String prop, HomePieceOfFurniture piece) {
         Map<HomePieceOfFurniture, Set<String>> byPiece = pieceMaterials.get(prop);
-        if (byPiece != null && piece != null) {
-            Set<String> set = byPiece.get(piece);
-            if (set != null) {
-                return set;
-            }
-        }
-        return materials.get(prop);
+        Set<String> set = (byPiece != null && piece != null) ? byPiece.get(piece) : null;
+        return set != null ? set : materials.get(prop);
     }
 
     /** Ensures and returns the per-piece material set for the specified piece. */
     public Set<String> ensureMaterialsForPiece(String prop, HomePieceOfFurniture piece) {
-        Map<HomePieceOfFurniture, Set<String>> byPiece = pieceMaterials.get(prop);
-        if (byPiece == null) {
-            byPiece = new IdentityHashMap<>();
-            pieceMaterials.put(prop, byPiece);
-        }
-        Set<String> set = byPiece.get(piece);
-        if (set == null) {
-            set = new LinkedHashSet<>();
-            byPiece.put(piece, set);
-        }
-        return set;
+        return pieceMaterials.computeIfAbsent(prop, k -> new IdentityHashMap<>())
+                .computeIfAbsent(piece, k -> new LinkedHashSet<>());
     }
 
-    /** Checks if any piece has a specific per-piece material configuration. */
-    public boolean hasPerPieceMaterials(String prop) {
+    /** Collects the union of all per-piece material names configured for property prop. */
+    private Set<String> unionPerPieceMaterials(String prop) {
+        Set<String> union = new LinkedHashSet<>();
         Map<HomePieceOfFurniture, Set<String>> byPiece = pieceMaterials.get(prop);
-        if (byPiece == null) {
-            return false;
-        }
-        for (Set<String> set : byPiece.values()) {
-            if (set != null && !set.isEmpty()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** Returns the total count of distinct targeted material names for property prop. */
-    public int totalMaterialsCount(String prop) {
-        Map<HomePieceOfFurniture, Set<String>> byPiece = pieceMaterials.get(prop);
-        if (byPiece != null && !byPiece.isEmpty()) {
-            Set<String> union = new LinkedHashSet<>();
+        if (byPiece != null) {
             for (Set<String> set : byPiece.values()) {
                 if (set != null) {
                     union.addAll(set);
                 }
             }
-            if (!union.isEmpty()) {
-                return union.size();
-            }
+        }
+        return union;
+    }
+
+    /** Checks if any piece has a specific per-piece material configuration. */
+    public boolean hasPerPieceMaterials(String prop) {
+        return !unionPerPieceMaterials(prop).isEmpty();
+    }
+
+    /** Returns the total count of distinct targeted material names for property prop. */
+    public int totalMaterialsCount(String prop) {
+        Set<String> perPiece = unionPerPieceMaterials(prop);
+        if (!perPiece.isEmpty()) {
+            return perPiece.size();
         }
         Set<String> flat = materials.get(prop);
         return flat != null ? flat.size() : 0;
@@ -394,14 +359,7 @@ public class SurroundRandomSettings {
         if (flat != null) {
             union.addAll(flat);
         }
-        Map<HomePieceOfFurniture, Set<String>> byPiece = pieceMaterials.get(prop);
-        if (byPiece != null) {
-            for (Set<String> set : byPiece.values()) {
-                if (set != null) {
-                    union.addAll(set);
-                }
-            }
-        }
+        union.addAll(unionPerPieceMaterials(prop));
         return union;
     }
 
@@ -420,59 +378,32 @@ public class SurroundRandomSettings {
             return look.hasAnything();
         }
         int mode = modes.get(prop);
-        double min = mins.get(prop);
-        double max = maxs.get(prop);
-        if (mode == MODE_ADD) {
-            return min != 0.0 || max != 0.0;
-        }
-        if (mode == MODE_PERCENT) {
-            return min != 100.0 || max != 100.0;
-        }
-        return true;
+        double min = mins.get(prop), max = maxs.get(prop);
+        return mode == MODE_ADD ? (min != 0.0 || max != 0.0)
+                : mode == MODE_PERCENT ? (min != 100.0 || max != 100.0) : true;
     }
 
     /** Checks if any random feature (including mirroring) is currently active. */
     public boolean hasAny() {
-        if (mirror && mirrorProbability > 0) {
-            return true;
-        }
-        for (String prop : RANDOM_PROPS) {
-            if (isActive(prop)) {
-                return true;
-            }
-        }
-        return false;
+        return activeFeatureCount() > 0;
     }
 
     /** Returns the count of active random features for summary display in the UI. */
     public int activeFeatureCount() {
-        int count = 0;
+        int count = (mirror && mirrorProbability > 0) ? 1 : 0;
         for (String prop : RANDOM_PROPS) {
             if (isActive(prop)) {
                 count++;
             }
-        }
-        if (mirror && mirrorProbability > 0) {
-            count++;
         }
         return count;
     }
 
     /** Draws a randomized value for property {@code prop} based on its mode and range bounds. */
     public double draw(String prop, double current, Random rng) {
-        int mode = modes.get(prop);
-        double a = mins.get(prop);
-        double b = maxs.get(prop);
-        double lo = Math.min(a, b);
-        double hi = Math.max(a, b);
-        double r = lo + (hi - lo) * rng.nextDouble();
-        if (mode == MODE_VALUE) {
-            return r;
-        } else if (mode == MODE_ADD) {
-            return current + r;
-        } else {
-            return current * (r / 100.0);
-        }
+        double lo = Math.min(mins.get(prop), maxs.get(prop));
+        double hi = Math.max(mins.get(prop), maxs.get(prop));
+        return applyMode(modes.get(prop), current, lo + (hi - lo) * rng.nextDouble());
     }
 
     /**
@@ -483,35 +414,17 @@ public class SurroundRandomSettings {
      * @param itemIndex 0-based sequence index
      */
     public double evalGradual(String prop, double current, double t, int itemIndex) {
-        int mode = modes.get(prop);
-        double startVal = mins.get(prop);
-        double endOrStep = maxs.get(prop);
-        double v;
-        if (gradualPattern == PATTERN_STEP) {
-            v = startVal + itemIndex * endOrStep;
-        } else {
-            double effT = gradualPattern == PATTERN_PING_PONG
-                    ? (t <= 0.5 ? (t * 2.0) : (2.0 * (1.0 - t)))
-                    : t;
-            v = startVal + (endOrStep - startVal) * Math.max(0.0, Math.min(1.0, effT));
-        }
-        if (mode == MODE_VALUE) {
-            return v;
-        } else if (mode == MODE_ADD) {
-            return current + v;
-        } else {
-            return current * (v / 100.0);
-        }
+        double startVal = mins.get(prop), endOrStep = maxs.get(prop);
+        double effT = gradualPattern == PATTERN_PING_PONG ? (t <= 0.5 ? t * 2.0 : 2.0 * (1.0 - t)) : t;
+        double v = gradualPattern == PATTERN_STEP
+                ? startVal + itemIndex * endOrStep
+                : startVal + (endOrStep - startVal) * Math.max(0.0, Math.min(1.0, effT));
+        return applyMode(modes.get(prop), current, v);
     }
 
     /** Returns true if any gradual property is enabled. */
     public boolean hasAnyGradual() {
-        for (String prop : RANDOM_PROPS) {
-            if (Boolean.TRUE.equals(enabled.get(prop))) {
-                return true;
-            }
-        }
-        return false;
+        return activeGradualCount() > 0;
     }
 
     /** Returns count of active gradual properties. */
@@ -532,18 +445,19 @@ public class SurroundRandomSettings {
         return copy;
     }
 
+    /** Replaces all entries of a destination map with those of a source map. */
+    private static <K, V> void replaceMap(Map<K, V> dst, Map<K, V> src) {
+        dst.clear();
+        dst.putAll(src);
+    }
+
     /** Copies all configurations from a source instance into this instance. */
     public void copyFrom(SurroundRandomSettings src) {
-        enabled.clear();
-        enabled.putAll(src.enabled);
-        modes.clear();
-        modes.putAll(src.modes);
-        mins.clear();
-        mins.putAll(src.mins);
-        maxs.clear();
-        maxs.putAll(src.maxs);
-        whole.clear();
-        whole.putAll(src.whole);
+        replaceMap(enabled, src.enabled);
+        replaceMap(modes, src.modes);
+        replaceMap(mins, src.mins);
+        replaceMap(maxs, src.maxs);
+        replaceMap(whole, src.whole);
         materials.clear();
         for (Map.Entry<String, Set<String>> e : src.materials.entrySet()) {
             materials.put(e.getKey(), new LinkedHashSet<>(e.getValue()));

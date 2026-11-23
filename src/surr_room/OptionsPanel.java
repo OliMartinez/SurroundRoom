@@ -8,11 +8,8 @@
  */
 package surr_room;
 
-import com.eteks.sweethome3d.model.CatalogPieceOfFurniture;
-import com.eteks.sweethome3d.model.FurnitureCatalog;
-import com.eteks.sweethome3d.model.FurnitureCategory;
+import com.eteks.sweethome3d.model.HomePieceOfFurniture;
 import com.eteks.sweethome3d.model.UserPreferences;
-import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
@@ -58,10 +55,10 @@ class OptionsPanel extends JPanel {
     final JRadioButton dimSelectedRadio;
     /** Width-only mode: only piece width is scaled to cover the side. */
     final JRadioButton dimWidthOnlyRadio;
-    /** Row containing checkboxes for depth and height modification. */
+    /** Row containing checkboxes for width (locked), depth, and height modification. */
     final JPanel dimSelectedChecksRow;
-    /** Checkboxes for allowing depth and height modification. */
-    final JCheckBox dimCheckD, dimCheckH;
+    /** Checkboxes for allowing width (always on), depth, and height modification. */
+    final JCheckBox dimCheckW, dimCheckD, dimCheckH;
 
     // 3. Direction & symmetric ends (Types 5, 6, 7)
     /** Section container for direction reversal and symmetric end options. */
@@ -191,8 +188,8 @@ class OptionsPanel extends JPanel {
     final JSpinner cornerMarginSpinner;
     /** Unit label for corner margin spinner. */
     final JLabel cornerMarginUnitLabel;
-    /** Info badge for corner margin spinner. */
-    final JLabel cornerMarginInfoIcon;
+    /** Sign hint label for corner margin spinner (+ separates, - overlaps). */
+    final JLabel cornerMarginSignHint;
     /** Side pieces extend up to the 1st vertex of the corner piece. */
     final JRadioButton orthoFirstVertexRadio;
     /** Side pieces extend up to the 2nd vertex of the corner piece. */
@@ -207,14 +204,18 @@ class OptionsPanel extends JPanel {
     final JPanel cornerKeepSizeRow;
     /** Keep original corner piece dimensions rather than matching side object size (Types 3 &amp; 4). */
     final JCheckBox cornerKeepSizeCheckBox;
-    /** Checkbox allowing a custom piece from the furniture catalog to be used as corner piece. */
+    /** Checkbox allowing a custom piece picked from the plan, furniture list, or SH3D catalog for corners. */
     final JCheckBox useCatalogCornerCheckBox;
-    /** Row holding catalog category and piece dropdowns. */
+    /** Row holding corner object picker button and selected piece summary. */
     final JPanel catalogCombosRow;
-    /** Dropdown selecting catalog furniture category for corner pieces. */
-    final JComboBox<FurnitureCategory> catalogCategoryCombo;
-    /** Dropdown selecting specific catalog furniture piece for corner pieces. */
-    final JComboBox<CatalogPieceOfFurniture> catalogPieceCombo;
+    /** Button launching the native ObjectPicker to choose a corner piece from the plan or catalog. */
+    final JButton pickCornerObjectButton;
+    /** Label displaying the currently selected corner object name and dimensions. */
+    final JLabel cornerObjectLabel;
+    /** Custom corner piece picked by the user from the plan, furniture list, or SH3D catalog. */
+    private HomePieceOfFurniture customCornerPiece;
+    /** Callback invoked to launch corner object picking via Sweet Home 3D. */
+    private Runnable onPickCornerObject;
 
     // Global Side Ends sub-panel
     /** Sub-panel hosting global side start and end termination options. */
@@ -277,7 +278,7 @@ class OptionsPanel extends JPanel {
         UiKit.addOptionRow(this, row++, 1,
                 new JLabel(t.get("t7EdgeDistance", "Distance from the edge:")),
                 distanceSpinner, new JLabel("cm"),
-                UiKit.infoIcon(t.get("t7EdgeHint", "0: back on the edge. Positive: moves away. Negative: moves inward.")));
+                UiKit.hint(t.get("edgeDistanceSignHint", "(+ away, \u2212 inward)")));
 
         // ---- 1. Model grouping ----
         enableGroupingCheckBox = new JCheckBox(t.get("enableGrouping", "Group generated models:"), false);
@@ -296,17 +297,18 @@ class OptionsPanel extends JPanel {
         int dr = 0;
         UiKit.addOptionRow(dimModifySection, dr++, 1, new JLabel(t.get("dimModifyTitle", "Dimensions that change:")));
         dimProportionalRadio = new JRadioButton(t.get("dimProportional", "Proportional (all)"), true);
-        dimSelectedRadio = new JRadioButton(t.get("dimSelectedOnly", "Only the selected ones:"));
+        dimSelectedRadio = new JRadioButton(t.get("dimSelectedOnly", "Width and selected:"));
         dimWidthOnlyRadio = new JRadioButton(t.get("dimWidthOnly", "Width only"));
         group(dimProportionalRadio, dimSelectedRadio, dimWidthOnlyRadio);
         UiKit.addOptionRow(dimModifySection, dr++, 2, dimProportionalRadio);
         UiKit.addOptionRow(dimModifySection, dr++, 2, dimSelectedRadio);
 
+        dimCheckW = new JCheckBox(t.get("t7Width", "Width"), true);
+        dimCheckW.setEnabled(false);
         dimCheckD = new JCheckBox(t.get("t7Depth", "Depth"), true);
         dimCheckH = new JCheckBox(t.get("t7Height", "Height"), false);
         dimSelectedChecksRow = UiKit.addOptionRow(dimModifySection, dr++, 3,
-                dimCheckD, Box.createHorizontalStrut(6), dimCheckH,
-                UiKit.infoIcon(t.get("dimWidthAlwaysTip", "The width always changes so that the objects cover the side.")));
+                dimCheckW, Box.createHorizontalStrut(6), dimCheckD, Box.createHorizontalStrut(6), dimCheckH);
         UiKit.addOptionRow(dimModifySection, dr++, 2, dimWidthOnlyRadio);
         addSubPanel(dimModifySection, row++);
         for (JRadioButton radio : new JRadioButton[]{dimProportionalRadio, dimSelectedRadio, dimWidthOnlyRadio}) {
@@ -326,37 +328,33 @@ class OptionsPanel extends JPanel {
         pieceMarginSection = new JPanel(new GridBagLayout());
         enablePieceMarginCheckBox = new JCheckBox(t.get("enablePieceMargin", "Leave margin around the piece:"), false);
         pieceMarginSpinner = UiKit.spinner(new SpinnerNumberModel(2.0, -5000.0, 5000.0, 0.5), 5);
-        UiKit.addOptionRow(pieceMarginSection, 0, 1, enablePieceMarginCheckBox,
-                UiKit.infoIcon(t.get("pieceMarginTip", "Positive: leaves space around the piece. Negative: overlaps by that distance.")));
+        UiKit.addOptionRow(pieceMarginSection, 0, 1, enablePieceMarginCheckBox);
         pieceMarginSubRow = UiKit.addOptionRow(pieceMarginSection, 1, 2,
-                new JLabel(t.get("pieceMarginValue", "Margin:")), pieceMarginSpinner, new JLabel("cm"));
+                new JLabel(t.get("pieceMarginValue", "Margin:")), pieceMarginSpinner, new JLabel("cm"),
+                UiKit.hint(t.get("pieceMarginSignHint", "(+ separates, \u2212 overlaps)")));
         addSubPanel(pieceMarginSection, row++);
         UiKit.addSpacerRow(this, row++);
 
         // ---- 5. Gaps, collisions and excluded sub-stretches ----
         UiKit.addOptionRow(this, row++, 0, UiKit.subtitle(t.get("sidesAndObstaclesTitle", "Openings and collisions")));
 
-        splitAtObstaclesCheckBox = new JCheckBox(t.get("splitAtObstacles", "Respect door and window openings:"), true);
-        UiKit.addOptionRow(this, row++, 1, splitAtObstaclesCheckBox,
-                UiKit.infoIcon(t.get("splitAtObstaclesTip", "Each free stretch is filled separately. Furniture is handled by \"Avoid collisions\".")));
+        splitAtObstaclesCheckBox = new JCheckBox(t.get("splitAtObstacles", "Respect door openings"), true);
+        UiKit.addOptionRow(this, row++, 1, splitAtObstaclesCheckBox);
+
+        respectWindowsCheckBox = new JCheckBox(t.get("respectWindows", "Respect window openings"), false);
+        UiKit.addOptionRow(this, row++, 1, respectWindowsCheckBox);
 
         gapsSubPanel = new JPanel(new GridBagLayout());
-        respectWindowsCheckBox = new JCheckBox(t.get("respectWindows", "Windows too"), false);
-        UiKit.addOptionRow(gapsSubPanel, 0, 2, respectWindowsCheckBox,
-                UiKit.infoIcon(t.get("respectWindowsTip", "Unchecked: doors only. A window starts above the floor; a door starts on it.")));
         gapHeightRangeCheckBox = new JCheckBox(t.get("gapHeightRange", "Only openings between these heights:"), false);
-        UiKit.addOptionRow(gapsSubPanel, 1, 2, gapHeightRangeCheckBox,
-                UiKit.infoIcon(t.get("gapHeightRangeTip", "By default, an opening counts where it crosses the height of the objects.")));
+        UiKit.addOptionRow(gapsSubPanel, 0, 2, gapHeightRangeCheckBox);
         gapMinHeightSpinner = UiKit.spinner(new SpinnerNumberModel(0.0, -1000.0, 10000.0, 1.0), 5);
         gapMaxHeightSpinner = UiKit.spinner(new SpinnerNumberModel(250.0, -1000.0, 10000.0, 1.0), 5);
-        gapHeightRow = UiKit.addOptionRow(gapsSubPanel, 2, 3, gapMinHeightSpinner,
+        gapHeightRow = UiKit.addOptionRow(gapsSubPanel, 1, 3, gapMinHeightSpinner,
                 new JLabel(t.get("gapHeightTo", "to")), gapMaxHeightSpinner, new JLabel("cm"));
-        enableGapFitToleranceCheckBox = new JCheckBox(t.get("enableGapFitTolerance", "Tolerance when not fitting completely:"), false);
+        enableGapFitToleranceCheckBox = new JCheckBox(t.get("enableGapFitTolerance", "Allow overlap if it does not fit:"), false);
         gapFitToleranceSpinner = UiKit.spinner(new SpinnerNumberModel(5.0, 0.5, 500.0, 0.5), 5);
-        gapToleranceHeaderRow = UiKit.addOptionRow(gapsSubPanel, 3, 2, enableGapFitToleranceCheckBox,
-                UiKit.infoIcon(t.get("gapFitToleranceTip",
-                        "Allows placing objects in free spaces where they fall short of fitting by up to this distance, permitting that overlap laterally, in depth or in height with the opening.")));
-        gapFitToleranceSubRow = UiKit.addOptionRow(gapsSubPanel, 4, 3,
+        gapToleranceHeaderRow = UiKit.addOptionRow(gapsSubPanel, 2, 2, enableGapFitToleranceCheckBox);
+        gapFitToleranceSubRow = UiKit.addOptionRow(gapsSubPanel, 3, 3,
                 new JLabel(t.get("fitToleranceValue", "Max.:")), gapFitToleranceSpinner, new JLabel("cm"));
         addSubPanel(gapsSubPanel, row++);
 
@@ -364,8 +362,7 @@ class OptionsPanel extends JPanel {
         UiKit.addOptionRow(this, row++, 1, shortSidesCheckBox);
 
         avoidCollisionsCheckBox = new JCheckBox(t.get("avoidCollisions", "Avoid collisions with furniture and walls:"), false);
-        UiKit.addOptionRow(this, row++, 1, avoidCollisionsCheckBox,
-                UiKit.infoIcon(t.get("avoidCollisionsTip", "Sides interrupted by a piece of furniture are filled in stretches.")));
+        UiKit.addOptionRow(this, row++, 1, avoidCollisionsCheckBox);
 
         avoidCollisionsSubPanel = new JPanel(new GridBagLayout());
         int acr = 0;
@@ -374,14 +371,10 @@ class OptionsPanel extends JPanel {
             UiKit.addOptionRow(avoidCollisionsSubPanel, acr++, 2, avoidNearbyFloorsCheckBox);
         }
         avoidNewlyGeneratedCheckBox = new JCheckBox(t.get("avoidNewlyGenerated", "Include the objects being placed (other sides and rooms)"), false);
-        UiKit.addOptionRow(avoidCollisionsSubPanel, acr++, 2, avoidNewlyGeneratedCheckBox,
-                UiKit.infoIcon(t.get("avoidNewlyGeneratedTip",
-                        "Only avoids the objects placed on other sides or other selected surfaces (never those of the same side or its corner pieces).")));
-        enableCollisionFitToleranceCheckBox = new JCheckBox(t.get("enableCollisionFitTolerance", "Tolerance when not fitting completely:"), false);
+        UiKit.addOptionRow(avoidCollisionsSubPanel, acr++, 2, avoidNewlyGeneratedCheckBox);
+        enableCollisionFitToleranceCheckBox = new JCheckBox(t.get("enableCollisionFitTolerance", "Allow overlap if it does not fit:"), false);
         collisionFitToleranceSpinner = UiKit.spinner(new SpinnerNumberModel(5.0, 0.5, 500.0, 0.5), 5);
-        collisionToleranceHeaderRow = UiKit.addOptionRow(avoidCollisionsSubPanel, acr++, 2, enableCollisionFitToleranceCheckBox,
-                UiKit.infoIcon(t.get("collisionFitToleranceTip",
-                        "Allows placing objects in free spaces where they do not completely fit by up to this tolerance, permitting that overlap laterally, in depth or in height with furniture, walls or floors.")));
+        collisionToleranceHeaderRow = UiKit.addOptionRow(avoidCollisionsSubPanel, acr++, 2, enableCollisionFitToleranceCheckBox);
         collisionFitToleranceSubRow = UiKit.addOptionRow(avoidCollisionsSubPanel, acr++, 3,
                 new JLabel(t.get("fitToleranceValue", "Max.:")), collisionFitToleranceSpinner, new JLabel("cm"));
         addSubPanel(avoidCollisionsSubPanel, row++);
@@ -433,8 +426,7 @@ class OptionsPanel extends JPanel {
                 updateRandomPropsSummary();
             }
         });
-        UiKit.addOptionRow(this, row++, 0, enableRandomPropsCheckBox,
-                UiKit.infoIcon(t.get("enableRandomPropsTip", "Randomly varies color/texture, shininess, light, elevation, height, tilt or mirror depending on active settings.")));
+        UiKit.addOptionRow(this, row++, 0, enableRandomPropsCheckBox);
         randomPropsSubRow = UiKit.addOptionRow(this, row++, 1, configureRandomPropsButton,
                 Box.createHorizontalStrut(8), randomPropsSummaryLabel);
 
@@ -458,17 +450,14 @@ class OptionsPanel extends JPanel {
                 updateGradualPropsSummary();
             }
         });
-        UiKit.addOptionRow(this, row++, 0, enableGradualPropsCheckBox,
-                UiKit.infoIcon(t.get("enableGradualPropsTip", "Applies a gradual progression (linear, back-and-forth or fixed step) to chosen properties along the outline, per side or per stacked level.")));
+        UiKit.addOptionRow(this, row++, 0, enableGradualPropsCheckBox);
         gradualPropsSubRow = UiKit.addOptionRow(this, row++, 1, configureGradualPropsButton,
                 Box.createHorizontalStrut(8), gradualPropsSummaryLabel);
         UiKit.addSpacerRow(this, row++);
 
         // ---- 8. Corners & Global Side Ends ----
         enableCornerHandlingCheckBox = new JCheckBox(t.get("enableCornerHandling", "Corner handling:"), false);
-        cornerHeaderRow = UiKit.addOptionRow(this, row++, 0, enableCornerHandlingCheckBox,
-                UiKit.infoIcon(t.get("cornerHandlingTip",
-                        "Types 1 to 6: configures empty corners or perpendicular pieces. Type 7: rotates and shifts any object landing on a vertex to touch the separation margins of both sides.")));
+        cornerHeaderRow = UiKit.addOptionRow(this, row++, 0, enableCornerHandlingCheckBox);
 
         cornerRows = new JPanel(new GridBagLayout());
         int cr = 0;
@@ -485,13 +474,13 @@ class OptionsPanel extends JPanel {
         orthoSeparateRadio = new JRadioButton(t.get("orthoSeparate", "Leave margin around the piece:"));
         cornerMarginSpinner = UiKit.spinner(new SpinnerNumberModel(2.0, -5000.0, 5000.0, 0.5), 5);
         cornerMarginUnitLabel = new JLabel("cm");
-        cornerMarginInfoIcon = UiKit.infoIcon(t.get("pieceMarginTip", "Positive: leaves space around the piece. Negative: overlaps by that distance."));
+        cornerMarginSignHint = UiKit.hint(t.get("pieceMarginSignHint", "(+ separates, \u2212 overlaps)"));
         orthoFirstVertexRadio = new JRadioButton(t.get("orthoFirstVertex", "Up to 1st vertex of the piece"));
         orthoSecondVertexRadio = new JRadioButton(t.get("orthoSecondVertex", "Up to 2nd vertex of the piece"));
         orthoMidVertexRadio = new JRadioButton(t.get("orthoMidVertex", "Up to midpoint between 1st and 2nd vertex"));
         group(orthoOverlapRadio, orthoSeparateRadio, orthoFirstVertexRadio, orthoSecondVertexRadio, orthoMidVertexRadio);
         UiKit.addOptionRow(orthoSubPanel, or++, 1, orthoOverlapRadio);
-        UiKit.addOptionRow(orthoSubPanel, or++, 1, orthoSeparateRadio, cornerMarginSpinner, cornerMarginUnitLabel, cornerMarginInfoIcon);
+        UiKit.addOptionRow(orthoSubPanel, or++, 1, orthoSeparateRadio, cornerMarginSpinner, cornerMarginUnitLabel, cornerMarginSignHint);
         UiKit.addOptionRow(orthoSubPanel, or++, 1, orthoFirstVertexRadio,
                 UiKit.infoIcon(t.get("orthoFirstVertexTip",
                         "The objects of the sides reach the vertex of the corner piece nearest to them. The piece stays square to the corner and takes the size of the objects of its side.")));
@@ -506,19 +495,21 @@ class OptionsPanel extends JPanel {
         cornerTouchVertexRow = UiKit.addOptionRow(orthoSubPanel, or++, 1, cornerTouchVertexCheckBox,
                 UiKit.infoIcon(t.get("cornerTouchVertexTip",
                         "On corners under 180\u00b0, places the bottom edge of the piece directly against the vertex (allowing overlap with the sides without crossing the vertex into the wall or floor).")));
-        cornerKeepSizeCheckBox = new JCheckBox(t.get("cornerKeepSize", "Keep the size of the corner piece"), false);
-        cornerKeepSizeRow = UiKit.addOptionRow(orthoSubPanel, or++, 1, cornerKeepSizeCheckBox,
-                UiKit.infoIcon(t.get("cornerKeepSizeTip",
-                        "Types 3 and 4: the corner piece isn't resized with the objects of its side.")));
+        cornerKeepSizeCheckBox = new JCheckBox(t.get("cornerKeepSize", "Keep original size of the corner piece"), false);
+        cornerKeepSizeRow = UiKit.addOptionRow(orthoSubPanel, or++, 1, cornerKeepSizeCheckBox);
 
-        // Custom catalog piece for corners
-        useCatalogCornerCheckBox = new JCheckBox(t.get("useCatalogCorner", "Use a catalog piece for the corners:"), false);
-        catalogCategoryCombo = new JComboBox<>();
-        catalogPieceCombo = new JComboBox<>();
-        catalogCategoryCombo.setPreferredSize(new Dimension(170, catalogCategoryCombo.getPreferredSize().height));
-        catalogPieceCombo.setPreferredSize(new Dimension(240, catalogPieceCombo.getPreferredSize().height));
+        // Custom piece for corners (picked directly from plan, furniture list, or SH3D catalog)
+        useCatalogCornerCheckBox = new JCheckBox(t.get("useCatalogCorner", "Use another object for the corners:"), false);
+        pickCornerObjectButton = new JButton(t.get("pickCornerObjectButton", "Select object\u2026"));
+        pickCornerObjectButton.addActionListener(e -> {
+            if (onPickCornerObject != null) {
+                onPickCornerObject.run();
+            }
+        });
+        cornerObjectLabel = UiKit.hint(t.get("cornerObjectNone", "None selected"));
         UiKit.addOptionRow(orthoSubPanel, or++, 1, useCatalogCornerCheckBox);
-        catalogCombosRow = UiKit.addOptionRow(orthoSubPanel, or++, 2, catalogCategoryCombo, Box.createHorizontalStrut(6), catalogPieceCombo);
+        catalogCombosRow = UiKit.addOptionRow(orthoSubPanel, or++, 2, pickCornerObjectButton,
+                Box.createHorizontalStrut(8), cornerObjectLabel);
 
         addSubPanel(cornerRows, orthoSubPanel, cr++, 0);
 
@@ -563,45 +554,14 @@ class OptionsPanel extends JPanel {
 
         extraObjectRespectObstaclesCheckBox = new JCheckBox(
                 t.get("extraObjectRespectObstacles", "The extra object respects openings and collisions:"), true);
-        extraObjectRespectRow = UiKit.addOptionRow(customEndsSubPanel, cer++, 1, extraObjectRespectObstaclesCheckBox,
-                UiKit.infoIcon(t.get("extraObjectRespectObstaclesTip",
-                        "The extra object isn't placed over doors, windows or excluded stretches, nor colliding with what collision avoidance checks (the objects of the other sides only when it includes the generated objects).")));
+        extraObjectRespectRow = UiKit.addOptionRow(customEndsSubPanel, cer++, 1, extraObjectRespectObstaclesCheckBox);
         extraObjectRespectCornersCheckBox = new JCheckBox(
-                t.get("extraObjectRespectCorners", "Without getting into the other sides at the corners"), true);
-        extraObjectCornersRow = UiKit.addOptionRow(customEndsSubPanel, cer++, 2, extraObjectRespectCornersCheckBox,
-                UiKit.infoIcon(t.get("extraObjectRespectCornersTip",
-                        "The extra object isn't placed where it would get past the vertex into the wall or floor of the other side, as at concave corners.")));
+                t.get("extraObjectRespectCorners", "Without crossing the vertex to the other side (concave corners)"), true);
+        extraObjectCornersRow = UiKit.addOptionRow(customEndsSubPanel, cer++, 2, extraObjectRespectCornersCheckBox);
 
         addSubPanel(cornerRows, customEndsSubPanel, cr++, 0);
         UiKit.addFiller(cornerRows);
         addSubPanel(this, cornerRows, row++, UiKit.INDENT);
-
-        // Populate catalog dropdowns
-        catalogCategoryCombo.setRenderer(UiKit.renderer(FurnitureCategory.class, FurnitureCategory::getName, false));
-        catalogPieceCombo.setRenderer(UiKit.renderer(CatalogPieceOfFurniture.class,
-                piece -> String.format("%s (%.0fx%.0f cm)", piece.getName(), piece.getWidth(), piece.getDepth()), true));
-        if (userPreferences != null && userPreferences.getFurnitureCatalog() != null) {
-            FurnitureCatalog catalog = userPreferences.getFurnitureCatalog();
-            for (FurnitureCategory category : catalog.getCategories()) {
-                if (!category.getFurniture().isEmpty()) {
-                    catalogCategoryCombo.addItem(category);
-                }
-            }
-        }
-        ActionListener updateCategoryPieces = e -> {
-            catalogPieceCombo.removeAllItems();
-            FurnitureCategory selectedCat = (FurnitureCategory) catalogCategoryCombo.getSelectedItem();
-            if (selectedCat != null) {
-                for (CatalogPieceOfFurniture piece : selectedCat.getFurniture()) {
-                    catalogPieceCombo.addItem(piece);
-                }
-            }
-        };
-        catalogCategoryCombo.addActionListener(updateCategoryPieces);
-        if (catalogCategoryCombo.getItemCount() > 0) {
-            catalogCategoryCombo.setSelectedIndex(0);
-            updateCategoryPieces.actionPerformed(null);
-        }
 
         // Attach listeners across all controls
         ActionListener stateUpdater = e -> {
@@ -625,7 +585,7 @@ class OptionsPanel extends JPanel {
         }) {
             b.addActionListener(stateUpdater);
         }
-        for (JComboBox<?> cb : new JComboBox<?>[]{globalStartEndCombo, globalEndEndCombo, catalogCategoryCombo, catalogPieceCombo}) {
+        for (JComboBox<?> cb : new JComboBox<?>[]{globalStartEndCombo, globalEndEndCombo}) {
             cb.addActionListener(stateUpdater);
         }
         for (JSpinner sp : new JSpinner[]{distanceSpinner, pieceMarginSpinner, gapMinHeightSpinner, gapMaxHeightSpinner,
@@ -692,6 +652,9 @@ class OptionsPanel extends JPanel {
                 dimProportionalRadio.setSelected(true);
             }
         }
+        enableCornerHandlingCheckBox.setText(type == 7
+                ? texts.get("cornerHandlingType7", "Fit objects at corners (rotate on vertices)")
+                : texts.get("enableCornerHandling", "Corner handling:"));
         updateDependentVisibility();
     }
 
@@ -728,7 +691,8 @@ class OptionsPanel extends JPanel {
         pieceMarginSubRow.setVisible(supportsPieceMargin && enablePieceMarginCheckBox.isSelected());
 
         boolean supportsFitTolerance = (currentType != 4 || uniformSizeActive);
-        gapsSubPanel.setVisible(splitAtObstaclesCheckBox.isSelected());
+        boolean anyGap = splitAtObstaclesCheckBox.isSelected() || respectWindowsCheckBox.isSelected();
+        gapsSubPanel.setVisible(anyGap);
         gapHeightRow.setVisible(gapHeightRangeCheckBox.isSelected());
         gapToleranceHeaderRow.setVisible(supportsFitTolerance);
         gapFitToleranceSubRow.setVisible(supportsFitTolerance && enableGapFitToleranceCheckBox.isSelected());
@@ -745,33 +709,22 @@ class OptionsPanel extends JPanel {
         if (cornersActive) {
             boolean perp = cornerPlaceOrthogonalRadio.isSelected();
             orthoSubPanel.setVisible(perp);
-            boolean sepSelected = perp && orthoSeparateRadio.isSelected();
-            cornerMarginSpinner.setVisible(sepSelected);
-            cornerMarginUnitLabel.setVisible(sepSelected);
-            cornerMarginInfoIcon.setVisible(sepSelected);
+            setVisibleAll(perp && orthoSeparateRadio.isSelected(),
+                    cornerMarginSpinner, cornerMarginUnitLabel, cornerMarginSignHint);
             cornerTouchVertexRow.setVisible(perp);
             cornerKeepSizeRow.setVisible(perp && (currentType == 3 || currentType == 4));
 
-            boolean hasCatalog = catalogCategoryCombo.getItemCount() > 0;
-            useCatalogCornerCheckBox.setVisible(hasCatalog);
-            boolean catalog = perp && hasCatalog && useCatalogCornerCheckBox.isSelected();
-            catalogCombosRow.setVisible(catalog);
+            useCatalogCornerCheckBox.setVisible(true);
+            catalogCombosRow.setVisible(perp && useCatalogCornerCheckBox.isSelected());
 
             boolean customEnds = cornerCustomRadio.isSelected();
             customEndsSubPanel.setVisible(customEnds);
             if (customEnds) {
-                int sMode = globalStartEndCombo.getSelectedItem() instanceof Integer ? (Integer) globalStartEndCombo.getSelectedItem() : 0;
-                int eMode = globalEndEndCombo.getSelectedItem() instanceof Integer ? (Integer) globalEndEndCombo.getSelectedItem() : 0;
-                boolean sDist = (sMode == SurroundConfig.END_DISTANCE);
-                boolean eDist = (eMode == SurroundConfig.END_DISTANCE);
-                globalStartEndDistanceSpinner.setVisible(sDist);
-                globalStartEndCmLabel.setVisible(sDist);
-                globalEndEndDistanceSpinner.setVisible(eDist);
-                globalEndEndCmLabel.setVisible(eDist);
-                boolean hasExtraObj = (sMode == SurroundConfig.END_EXTRA_OBJECT
-                        || sMode == SurroundConfig.END_ADJACENT_TO_OBJECTS
-                        || eMode == SurroundConfig.END_EXTRA_OBJECT
-                        || eMode == SurroundConfig.END_ADJACENT_TO_OBJECTS);
+                int sMode = comboInt(globalStartEndCombo, 0);
+                int eMode = comboInt(globalEndEndCombo, 0);
+                setVisibleAll(sMode == SurroundConfig.END_DISTANCE, globalStartEndDistanceSpinner, globalStartEndCmLabel);
+                setVisibleAll(eMode == SurroundConfig.END_DISTANCE, globalEndEndDistanceSpinner, globalEndEndCmLabel);
+                boolean hasExtraObj = isExtraObjectMode(sMode) || isExtraObjectMode(eMode);
                 extraObjectRespectRow.setVisible(hasExtraObj);
                 extraObjectCornersRow.setVisible(hasExtraObj && extraObjectRespectObstaclesCheckBox.isSelected());
             }
@@ -808,13 +761,9 @@ class OptionsPanel extends JPanel {
 
     /** Populates the target {@link SurroundConfig} with values configured in this panel. */
     void fill(SurroundConfig cfg) {
-        cfg.distanceOffset = ((Number) distanceSpinner.getValue()).doubleValue();
-
-        if (!enableGroupingCheckBox.isSelected()) {
-            cfg.groupingMode = SurroundConfig.GROUP_NONE;
-        } else {
-            cfg.groupingMode = groupPerSideRadio.isSelected() ? SurroundConfig.GROUP_PER_SIDE : SurroundConfig.GROUP_ALL;
-        }
+        cfg.distanceOffset = spinnerDouble(distanceSpinner);
+        cfg.groupingMode = !enableGroupingCheckBox.isSelected() ? SurroundConfig.GROUP_NONE
+                : (groupPerSideRadio.isSelected() ? SurroundConfig.GROUP_PER_SIDE : SurroundConfig.GROUP_ALL);
 
         cfg.dimModifyMode = dimSelectedRadio.isSelected() ? SurroundConfig.DIM_SELECTED
                 : dimWidthOnlyRadio.isSelected() ? SurroundConfig.DIM_WIDTH_ONLY
@@ -825,31 +774,31 @@ class OptionsPanel extends JPanel {
         cfg.reverseDirection = (currentType == 5 || currentType == 6 || currentType == 7) && reverseDirectionCheckBox.isSelected();
         cfg.symmetricBothEnds = currentType == 6 && symmetricBothEndsCheckBox.isSelected();
 
-        boolean supportsPieceMargin = (currentType == 1 || currentType == 2 || currentType == 5);
-        cfg.enablePieceMargin = supportsPieceMargin && enablePieceMarginCheckBox.isSelected();
-        cfg.pieceMargin = cfg.enablePieceMargin ? ((Number) pieceMarginSpinner.getValue()).doubleValue() : 0.0;
+        cfg.enablePieceMargin = (currentType == 1 || currentType == 2 || currentType == 5) && enablePieceMarginCheckBox.isSelected();
+        cfg.pieceMargin = cfg.enablePieceMargin ? spinnerDouble(pieceMarginSpinner) : 0.0;
 
         boolean supportsFitTolerance = (currentType != 4 || uniformSizeActive);
         cfg.splitAtObstacles = splitAtObstaclesCheckBox.isSelected();
         cfg.respectWindows = respectWindowsCheckBox.isSelected();
-        cfg.gapHeightRange = gapHeightRangeCheckBox.isSelected();
-        cfg.gapMinHeight = ((Number) gapMinHeightSpinner.getValue()).doubleValue();
-        cfg.gapMaxHeight = Math.max(cfg.gapMinHeight, ((Number) gapMaxHeightSpinner.getValue()).doubleValue());
-        cfg.enableGapFitTolerance = cfg.splitAtObstacles && supportsFitTolerance && enableGapFitToleranceCheckBox.isSelected();
-        cfg.gapFitTolerance = cfg.enableGapFitTolerance ? ((Number) gapFitToleranceSpinner.getValue()).doubleValue() : 0.0;
+        boolean anyGap = cfg.splitAtObstacles || cfg.respectWindows;
+        cfg.gapHeightRange = anyGap && gapHeightRangeCheckBox.isSelected();
+        cfg.gapMinHeight = spinnerDouble(gapMinHeightSpinner);
+        cfg.gapMaxHeight = Math.max(cfg.gapMinHeight, spinnerDouble(gapMaxHeightSpinner));
+        cfg.enableGapFitTolerance = anyGap && supportsFitTolerance && enableGapFitToleranceCheckBox.isSelected();
+        cfg.gapFitTolerance = cfg.enableGapFitTolerance ? spinnerDouble(gapFitToleranceSpinner) : 0.0;
         cfg.shortSidesOneObject = shortSidesCheckBox.isSelected();
         cfg.avoidCollisions = avoidCollisionsCheckBox.isSelected();
         cfg.avoidNearbyFloors = cfg.avoidCollisions && hasFloors && avoidNearbyFloorsCheckBox.isSelected();
         cfg.avoidNewlyGenerated = cfg.avoidCollisions && avoidNewlyGeneratedCheckBox.isSelected();
         cfg.enableCollisionFitTolerance = cfg.avoidCollisions && supportsFitTolerance && enableCollisionFitToleranceCheckBox.isSelected();
-        cfg.collisionFitTolerance = cfg.enableCollisionFitTolerance ? ((Number) collisionFitToleranceSpinner.getValue()).doubleValue() : 0.0;
+        cfg.collisionFitTolerance = cfg.enableCollisionFitTolerance ? spinnerDouble(collisionFitToleranceSpinner) : 0.0;
         cfg.upperLevelFloorHolesMode = (hasUpperLevel && floorHolesNoPassRadio.isSelected())
                 ? SurroundConfig.FLOOR_HOLES_NO_PASS : SurroundConfig.FLOOR_HOLES_PASS;
 
         cfg.enableVerticalStacking = enableVerticalStackingCheckBox.isSelected();
         cfg.verticalStackCount = ((Number) verticalStackCountSpinner.getValue()).intValue();
         cfg.useCustomStackElevation = useCustomStackElevationCheckBox.isSelected();
-        cfg.customStackElevation = ((Number) customStackElevationSpinner.getValue()).doubleValue();
+        cfg.customStackElevation = spinnerDouble(customStackElevationSpinner);
 
         cfg.enableRandomProps = enableRandomPropsCheckBox.isSelected() && randomSettings.hasAny();
         cfg.randomSettings = randomSettings.copy();
@@ -866,17 +815,58 @@ class OptionsPanel extends JPanel {
         cfg.cornerKeepSize = cfg.placeOrthogonalCornerPiece && (currentType == 3 || currentType == 4)
                 && cornerKeepSizeCheckBox.isSelected();
         cfg.cornerPieceMargin = (cfg.placeOrthogonalCornerPiece && cfg.orthoSeparation == SurroundConfig.ORTHO_SEPARATE)
-                ? ((Number) cornerMarginSpinner.getValue()).doubleValue() : 0.0;
-        cfg.customCornerCatalogPiece = (cfg.placeOrthogonalCornerPiece && useCatalogCornerCheckBox.isSelected())
-                ? (CatalogPieceOfFurniture) catalogPieceCombo.getSelectedItem() : null;
-        cfg.globalStartEndMode = globalStartEndCombo.getSelectedItem() instanceof Integer
-                ? (Integer) globalStartEndCombo.getSelectedItem() : SurroundConfig.END_NORMAL;
-        cfg.globalStartEndDistance = ((Number) globalStartEndDistanceSpinner.getValue()).doubleValue();
-        cfg.globalEndEndMode = globalEndEndCombo.getSelectedItem() instanceof Integer
-                ? (Integer) globalEndEndCombo.getSelectedItem() : SurroundConfig.END_FIT;
-        cfg.globalEndEndDistance = ((Number) globalEndEndDistanceSpinner.getValue()).doubleValue();
+                ? spinnerDouble(cornerMarginSpinner) : 0.0;
+        cfg.customCornerPiece = (cfg.placeOrthogonalCornerPiece && useCatalogCornerCheckBox.isSelected())
+                ? customCornerPiece : null;
+        cfg.globalStartEndMode = comboInt(globalStartEndCombo, SurroundConfig.END_NORMAL);
+        cfg.globalStartEndDistance = spinnerDouble(globalStartEndDistanceSpinner);
+        cfg.globalEndEndMode = comboInt(globalEndEndCombo, SurroundConfig.END_FIT);
+        cfg.globalEndEndDistance = spinnerDouble(globalEndEndDistanceSpinner);
         cfg.extraObjectRespectObstacles = extraObjectRespectObstaclesCheckBox.isSelected();
         cfg.extraObjectRespectCorners = cfg.extraObjectRespectObstacles && extraObjectRespectCornersCheckBox.isSelected();
+    }
+
+    /** Extracts a double value from a numeric JSpinner. */
+    private static double spinnerDouble(JSpinner spinner) {
+        return ((Number) spinner.getValue()).doubleValue();
+    }
+
+    /** Extracts an Integer value from an end-mode combo box, falling back if unset. */
+    private static int comboInt(JComboBox<Integer> combo, int fallback) {
+        return combo.getSelectedItem() instanceof Integer ? (Integer) combo.getSelectedItem() : fallback;
+    }
+
+    /** Returns whether an end-mode constant places an extra object at side ends. */
+    private static boolean isExtraObjectMode(int mode) {
+        return mode == SurroundConfig.END_EXTRA_OBJECT || mode == SurroundConfig.END_ADJACENT_TO_OBJECTS;
+    }
+
+    /** Sets visibility on a group of sibling Swing components together. */
+    private static void setVisibleAll(boolean visible, java.awt.Component... components) {
+        for (java.awt.Component c : components) {
+            c.setVisible(visible);
+        }
+    }
+
+    /** Sets the callback invoked to pick a custom corner object from Sweet Home 3D. */
+    void setOnPickCornerObject(Runnable callback) {
+        this.onPickCornerObject = callback;
+    }
+
+    /** Sets the custom corner piece template and updates its summary label. */
+    void setCustomCornerPiece(HomePieceOfFurniture piece) {
+        this.customCornerPiece = piece;
+        if (piece != null) {
+            String name = piece.getName() != null && !piece.getName().trim().isEmpty() ? piece.getName().trim() : "?";
+            cornerObjectLabel.setText(String.format("%s (%.0f\u00d7%.0f cm)", name, piece.getWidth(), piece.getDepth()));
+        } else {
+            cornerObjectLabel.setText(texts.get("cornerObjectNone", "None selected"));
+        }
+    }
+
+    /** Returns the custom corner piece selected from the plan, furniture list, or catalog (or null). */
+    HomePieceOfFurniture getCustomCornerPiece() {
+        return customCornerPiece;
     }
 
     /** Sets the callback for configuring random properties and updates the summary badge. */

@@ -142,15 +142,7 @@ public final class MaterialUtils {
             return;
         }
 
-        Map<String, HomeMaterial> explicit = new LinkedHashMap<>();
-        HomeMaterial[] mats = piece.getModelMaterials();
-        if (mats != null) {
-            for (HomeMaterial m : mats) {
-                if (m != null && m.getName() != null) {
-                    explicit.put(m.getName(), m);
-                }
-            }
-        }
+        Map<String, HomeMaterial> explicit = explicitMaterialsMap(piece);
 
         Map<String, PieceMaterial> defaults = loadModelMaterials(piece);
         Set<String> allNames = new LinkedHashSet<>(defaults.keySet());
@@ -535,15 +527,7 @@ public final class MaterialUtils {
         if (all.isEmpty()) {
             return;
         }
-        Map<String, HomeMaterial> explicit = new LinkedHashMap<>();
-        HomeMaterial[] current = piece.getModelMaterials();
-        if (current != null) {
-            for (HomeMaterial m : current) {
-                if (m != null && m.getName() != null) {
-                    explicit.put(m.getName(), m);
-                }
-            }
-        }
+        Map<String, HomeMaterial> explicit = explicitMaterialsMap(piece);
 
         boolean setsLook = "color".equals(property) || "texture".equals(property) || "look".equals(property);
         boolean setsShine = "shininess".equals(property);
@@ -787,19 +771,33 @@ public final class MaterialUtils {
         }
     }
 
+    /** Builds a lookup map of explicitly overridden materials on a furniture piece. */
+    private static Map<String, HomeMaterial> explicitMaterialsMap(HomePieceOfFurniture piece) {
+        Map<String, HomeMaterial> explicit = new LinkedHashMap<>();
+        HomeMaterial[] mats = piece.getModelMaterials();
+        if (mats != null) {
+            for (HomeMaterial m : mats) {
+                if (m != null && m.getName() != null) {
+                    explicit.put(m.getName(), m);
+                }
+            }
+        }
+        return explicit;
+    }
+
+    /** Interpolates a single 8-bit RGB channel between two colors at factor {@code t}. */
+    private static int lerpChannel(int c0, int c1, int shift, double t) {
+        int a = (c0 >> shift) & 0xFF, b = (c1 >> shift) & 0xFF;
+        return Math.max(0, Math.min(255, (int) Math.round(a + (b - a) * t)));
+    }
+
     /** Interpolates RGB colors gradually from startColor to endColor based on normalized position t. */
     private static void applyGradualLook(HomePieceOfFurniture piece, SurroundRandomSettings grad, double t) {
         double effT = grad.gradualPattern == SurroundRandomSettings.PATTERN_PING_PONG
-                ? (t <= 0.5 ? (t * 2.0) : (2.0 * (1.0 - t)))
-                : Math.max(0.0, Math.min(1.0, t));
+                ? (t <= 0.5 ? t * 2.0 : 2.0 * (1.0 - t)) : clamp(t, 0.0, 1.0);
         int c0 = grad.look.startColor != null ? grad.look.startColor : 0x3A7BD5;
         int c1 = grad.look.endColor != null ? grad.look.endColor : 0xE67E22;
-        int r = (int) Math.round(((c0 >> 16) & 0xFF) + (((c1 >> 16) & 0xFF) - ((c0 >> 16) & 0xFF)) * effT);
-        int g = (int) Math.round(((c0 >> 8) & 0xFF) + (((c1 >> 8) & 0xFF) - ((c0 >> 8) & 0xFF)) * effT);
-        int b = (int) Math.round((c0 & 0xFF) + ((c1 & 0xFF) - (c0 & 0xFF)) * effT);
-        int rgb = (Math.max(0, Math.min(255, r)) << 16)
-                | (Math.max(0, Math.min(255, g)) << 8)
-                | Math.max(0, Math.min(255, b));
+        int rgb = (lerpChannel(c0, c1, 16, effT) << 16) | (lerpChannel(c0, c1, 8, effT) << 8) | lerpChannel(c0, c1, 0, effT);
         if (grad.isWholeTarget("look")) {
             setPieceValue(piece, "look", rgb);
         } else {
@@ -807,44 +805,36 @@ public final class MaterialUtils {
         }
     }
 
+    /** Resolves a sampled look value (HomeTexture or RGB Integer) for a target piece or sub-material. */
+    private static Object resolveRandomLook(SurroundRandomSettings.RandomLook look,
+            boolean hasTexture, Integer baseColor, Random rng) {
+        SurroundRandomSettings.RandomLook.Choice picked = look.drawChoice(rng);
+        if (picked != null) {
+            if (picked.texture != null) {
+                return picked.texture;
+            }
+            if (picked.color != null) {
+                return (look.varyComponents && picked.vary) ? look.varyColor(picked.color, rng) : picked.color;
+            }
+        }
+        if (look.varyComponents && !hasTexture) {
+            return look.varyColor(baseColor != null ? baseColor : 0x808080, rng);
+        }
+        return null;
+    }
+
     /** Samples and applies a random color or texture from the configured random look model. */
     private static void applyRandomLook(HomePieceOfFurniture piece, SurroundRandomSettings rnd, Random rng) {
         SurroundRandomSettings.RandomLook look = rnd.look;
         if (rnd.isWholeTarget("look")) {
-            SurroundRandomSettings.RandomLook.Choice picked = look.drawChoice(rng);
-            if (picked != null) {
-                if (picked.texture != null) {
-                    setPieceValue(piece, "look", picked.texture);
-                } else if (picked.color != null) {
-                    int rgb = (look.varyComponents && picked.vary) ? look.varyColor(picked.color, rng) : picked.color;
-                    setPieceValue(piece, "look", rgb);
-                }
-            } else if (look.varyComponents) {
-                if (piece.getColor() != null) {
-                    setPieceValue(piece, "look", look.varyColor(piece.getColor(), rng));
-                } else if (piece.getTexture() == null) {
-                    Integer base = firstMaterialColor(piece);
-                    int varied = look.varyColor(base != null ? base : 0x808080, rng);
-                    setPieceValue(piece, "look", varied);
-                }
+            Integer base = piece.getColor() != null ? piece.getColor() : firstMaterialColor(piece);
+            Object val = resolveRandomLook(look, piece.getColor() == null && piece.getTexture() != null, base, rng);
+            if (val != null) {
+                setPieceValue(piece, "look", val);
             }
         } else {
-            applyToMaterials(piece, "look", rnd.allSelectedMaterials("look"), m -> {
-                SurroundRandomSettings.RandomLook.Choice picked = look.drawChoice(rng);
-                if (picked != null) {
-                    if (picked.texture != null) {
-                        return picked.texture;
-                    }
-                    if (picked.color != null) {
-                        return (look.varyComponents && picked.vary) ? look.varyColor(picked.color, rng) : picked.color;
-                    }
-                }
-                if (look.varyComponents && (m == null || m.getTexture() == null)) {
-                    int base = (m != null && m.getColor() != null) ? m.getColor() : 0x808080;
-                    return look.varyColor(base, rng);
-                }
-                return null;
-            });
+            applyToMaterials(piece, "look", rnd.allSelectedMaterials("look"),
+                    m -> resolveRandomLook(look, m != null && m.getTexture() != null, m != null ? m.getColor() : null, rng));
         }
     }
 
@@ -898,30 +888,28 @@ public final class MaterialUtils {
         return (t.getCatalogId() != null ? t.getCatalogId() : "") + "|" + (t.getName() != null ? t.getName() : "");
     }
 
-    /** Checks if any piece in the list supports horizontal rotation (pitch and roll). */
-    public static boolean containsHorizontallyRotatable(List<HomePieceOfFurniture> pieces) {
+    /** Returns true if the list is empty/null or any non-null piece satisfies the predicate. */
+    private static boolean anyPieceMatches(List<HomePieceOfFurniture> pieces,
+            java.util.function.Predicate<HomePieceOfFurniture> test) {
         if (pieces == null || pieces.isEmpty()) {
             return true;
         }
         for (HomePieceOfFurniture p : pieces) {
-            if (p != null && p.isHorizontallyRotatable()) {
+            if (p != null && test.test(p)) {
                 return true;
             }
         }
         return false;
     }
 
+    /** Checks if any piece in the list supports horizontal rotation (pitch and roll). */
+    public static boolean containsHorizontallyRotatable(List<HomePieceOfFurniture> pieces) {
+        return anyPieceMatches(pieces, HomePieceOfFurniture::isHorizontallyRotatable);
+    }
+
     /** Checks if any piece in the list is resizable in width, depth, or height. */
     public static boolean containsResizable(List<HomePieceOfFurniture> pieces) {
-        if (pieces == null || pieces.isEmpty()) {
-            return true;
-        }
-        for (HomePieceOfFurniture p : pieces) {
-            if (p != null && p.isResizable()) {
-                return true;
-            }
-        }
-        return false;
+        return anyPieceMatches(pieces, HomePieceOfFurniture::isResizable);
     }
 
     /** Checks if the list contains any light fixture (HomeLight). */

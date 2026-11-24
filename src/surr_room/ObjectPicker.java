@@ -26,6 +26,7 @@ import com.eteks.sweethome3d.viewcontroller.HomeController;
 import java.awt.AWTEvent;
 import java.awt.BorderLayout;
 import java.awt.Dialog;
+import java.awt.Frame;
 import java.awt.KeyboardFocusManager;
 import java.awt.Toolkit;
 import java.awt.Window;
@@ -54,66 +55,31 @@ import javax.swing.Timer;
 import javax.swing.UIManager;
 
 /**
- * Floating, non-blocking prompt that waits for the template object(s) to be picked in the plan, the
- * furniture list or the catalog (catalog pieces become temporary copies). A global input listener and a
- * 300 ms timer wait until a multiple selection (Shift/Ctrl click, rubber band) is finished.
+ * Floating, non-blocking prompt that waits for template object(s) to be picked in the plan, the
+ * furniture list or the catalog. A global input listener and a 300 ms debounce timer wait until
+ * multi-selections (Shift/Ctrl click or marquee drag) settle.
  */
 final class ObjectPicker {
 
-    /**
-     * Bitmask of selection modifier keys or primary mouse button.
-     * When any of these bits are active, the user may still be modifying the selection.
-     */
+    /** Modifier / primary mouse button mask indicating an ongoing multi-selection gesture. */
     private static final int SELECTING_MASK = InputEvent.SHIFT_DOWN_MASK | InputEvent.CTRL_DOWN_MASK
             | InputEvent.META_DOWN_MASK | InputEvent.BUTTON1_DOWN_MASK;
 
-    /** Reference to the active Sweet Home 3D home model. */
     private final Home home;
-
-    /** Controller for the furniture catalog view, if available. */
     private final FurnitureCatalogController catalogController;
-
-    /** The floating, non-modal dialog window. */
     private final JDialog dialog;
-
-    /** Debounce timer ensuring selections settle before triggering the callback. */
     private final Timer timer;
-
-    /** Listener monitoring selection changes on the Home model (plan / furniture list). */
     private final SelectionListener selectionListener;
-
-    /** Listener monitoring selection changes in the furniture catalog view. */
     private final SelectionListener catalogSelectionListener;
-
-    /** Global AWT event listener tracking keyboard modifiers and mouse button state. */
     private final AWTEventListener inputListener;
-
-    /** Flag indicating whether the user is currently holding a selection modifier or mouse button. */
     private boolean selecting;
-
-    /** Flag indicating whether the picker has already been dismissed or disposed. */
     private boolean closed;
-
-    /** Flag used to suppress false triggers when programmatically clearing the catalog selection on startup. */
     private boolean ignoringCatalogClear;
-
-    /** Flag indicating whether the most recent selection event originated from the catalog view. */
     private boolean lastEventFromCatalog;
-
-    /** Flag indicating whether the user picked an object before the dialog closed. */
     private boolean pickedSuccess;
-
-    /** Whether to temporarily clear Home selection on open and restore it when picking finishes or cancels. */
     private final boolean clearAndRestoreHomeSelection;
-
-    /** Saved Home selection to restore once corner picking completes or is cancelled. */
     private List<Selectable> savedHomeSelection;
 
-    /**
-     * Private constructor initializing the floating dialog, event listeners, and layout.
-     *
-     * @param homeController the parent HomeController (may be null)
-     */
     private ObjectPicker(Window owner, Home home, HomeController homeController, String title,
             String messageText, String hintText, String summaryText, boolean alwaysOnTop,
             boolean clearAndRestoreHomeSelection,
@@ -131,26 +97,19 @@ final class ObjectPicker {
         }
         UiKit.applyWindowIcon(dialog);
 
-        // Timer debounces rapid clicks and multi-selection marquee drags (300 ms delay)
         timer = new Timer(300, e -> {
-            // Do not fire if the user is still actively dragging or holding modifier keys
             if (selecting || closed) {
                 return;
             }
-            List<HomePieceOfFurniture> picked = new ArrayList<>();
-            // Prefer catalog selection if the most recent event originated from catalog
-            if (lastEventFromCatalog && catalogController != null) {
-                picked = convertCatalogSelection(catalogController.getSelectedFurniture(), homeController);
-            }
-            // Fall back to home selection (plan or furniture list)
+            List<HomePieceOfFurniture> picked = (lastEventFromCatalog && catalogController != null)
+                    ? convertCatalogSelection(catalogController.getSelectedFurniture(), homeController)
+                    : Collections.<HomePieceOfFurniture>emptyList();
             if (picked.isEmpty()) {
                 picked = selectedFurniture(home.getSelectedItems());
             }
-            // Fall back to catalog if home selection was empty
             if (picked.isEmpty() && catalogController != null) {
                 picked = convertCatalogSelection(catalogController.getSelectedFurniture(), homeController);
             }
-            // If valid furniture pieces were resolved, conclude picking
             if (!picked.isEmpty()) {
                 pickedSuccess = true;
                 stopListening();
@@ -160,31 +119,24 @@ final class ObjectPicker {
         });
         timer.setRepeats(false);
 
-        // Listener for Home model selection changes
         selectionListener = ev -> {
             lastEventFromCatalog = false;
             timer.restart();
         };
-
-        // Listener for Catalog view selection changes
         catalogSelectionListener = ev -> {
             if (!ignoringCatalogClear) {
                 lastEventFromCatalog = true;
                 timer.restart();
             }
         };
-
-        // Global AWT input listener detecting modifier keys or active mouse drags
         inputListener = event -> {
             boolean wasSelecting = selecting;
             selecting = (((InputEvent) event).getModifiersEx() & SELECTING_MASK) != 0;
-            // When modifier/mouse button is released, restart debounce timer
             if (wasSelecting && !selecting) {
                 timer.restart();
             }
         };
 
-        // Build the dialog content pane
         JPanel content = new JPanel();
         content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
         content.setBorder(BorderFactory.createEmptyBorder(12, 14, 10, 14));
@@ -207,11 +159,8 @@ final class ObjectPicker {
         content.add(buttons);
         dialog.getContentPane().add(content, BorderLayout.CENTER);
 
-        // Escape key to dismiss dialog
         dialog.getRootPane().registerKeyboardAction(e -> dialog.dispose(),
                 KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), JComponent.WHEN_IN_FOCUSED_WINDOW);
-
-        // Clean up listeners when window is closed
         dialog.addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosed(WindowEvent e) {
@@ -223,8 +172,6 @@ final class ObjectPicker {
         });
         dialog.pack();
         dialog.setResizable(false);
-
-        // Position near top-right corner of the parent application window
         if (owner != null && owner.isShowing()) {
             dialog.setLocation(owner.getX() + owner.getWidth() - dialog.getWidth() - 40, owner.getY() + 90);
         } else {
@@ -232,12 +179,6 @@ final class ObjectPicker {
         }
     }
 
-    /**
-     * Creates, attaches listeners to, and displays an {@link ObjectPicker} floating dialog.
-     *
-     * @param prefs          user preferences (optional)
-     * @param onPicked       callback invoked when pieces are successfully selected
-     */
     static ObjectPicker show(Home home, HomeController homeController, UserPreferences prefs,
             UiKit.Texts t, String title, int floors, int walls,
             Consumer<List<HomePieceOfFurniture>> onPicked) {
@@ -252,15 +193,14 @@ final class ObjectPicker {
     }
 
     /**
-     * Displays an {@link ObjectPicker} floating dialog to choose a custom corner piece directly from
-     * the Sweet Home 3D plan, furniture list, or catalog. Temporarily clears the plan selection so even
-     * an already-selected piece can be picked in one click, and restores the prior selection on finish/cancel.
+     * Temporarily clears the plan selection so an already-selected piece can be picked in one click,
+     * restoring the prior selection on finish or cancel.
      */
     static ObjectPicker showForCorner(Window excludeOwner, Home home, HomeController homeController,
             UiKit.Texts t, String title, Consumer<List<HomePieceOfFurniture>> onPicked, Runnable onCancelled) {
         Window sh3dOwner = null;
         for (Window w : Window.getWindows()) {
-            if (w != excludeOwner && w.isShowing() && w instanceof java.awt.Frame) {
+            if (w != excludeOwner && w.isShowing() && w instanceof Frame) {
                 sh3dOwner = w;
                 break;
             }
@@ -274,7 +214,6 @@ final class ObjectPicker {
         return picker;
     }
 
-    /** Registers Home, Catalog, and global AWT input listeners and makes the picker dialog visible. */
     private static void attachAndShow(ObjectPicker picker) {
         if (picker.clearAndRestoreHomeSelection) {
             picker.savedHomeSelection = new ArrayList<>(picker.home.getSelectedItems());
@@ -295,66 +234,49 @@ final class ObjectPicker {
         try {
             Toolkit.getDefaultToolkit().addAWTEventListener(picker.inputListener,
                     AWTEvent.MOUSE_EVENT_MASK | AWTEvent.KEY_EVENT_MASK);
-        } catch (SecurityException ex) {
-            // If security manager disallows global listener, fallback to immediate selection events
+        } catch (SecurityException ignored) {
         }
         picker.dialog.setVisible(true);
     }
 
-    /**
-     * Convenience overload for {@link #show} without controller and user preferences.
-     *
-     * @param onPicked callback invoked when pieces are successfully selected
-     */
-    static ObjectPicker show(Home home, UiKit.Texts t, String title, int floors, int walls,
-            Consumer<List<HomePieceOfFurniture>> onPicked) {
-        return show(home, null, null, t, title, floors, walls, onPicked);
-    }
-
-    /** Programmatically closes and disposes the picker dialog. */
     void close() {
         dialog.dispose();
     }
 
-    /**
-     * Unregisters all selection and AWT event listeners and cancels the debounce timer.
-     * Ensures no memory leaks or dangling listeners remain on the Home or Toolkit.
-     */
     private void stopListening() {
-        if (!closed) {
-            closed = true;
-            timer.stop();
-            home.removeSelectionListener(selectionListener);
-            if (catalogController != null) {
-                catalogController.removeSelectionListener(catalogSelectionListener);
-            }
-            try {
-                Toolkit.getDefaultToolkit().removeAWTEventListener(inputListener);
-            } catch (SecurityException ex) {
-                // Ignore if security manager prevented adding the listener initially
-            }
-            if (clearAndRestoreHomeSelection && savedHomeSelection != null) {
-                List<Selectable> toRestore = savedHomeSelection;
-                savedHomeSelection = null;
-                Set<Selectable> present = new HashSet<>(home.getSelectableViewableItems());
-                present.addAll(home.getFurniture());
-                present.addAll(home.getRooms());
-                present.addAll(home.getWalls());
-                present.addAll(home.getPolylines());
-                present.addAll(home.getDimensionLines());
-                present.addAll(home.getLabels());
-                List<Selectable> valid = new ArrayList<>(toRestore.size());
-                for (Selectable s : toRestore) {
-                    if (present.contains(s)) {
-                        valid.add(s);
-                    }
+        if (closed) {
+            return;
+        }
+        closed = true;
+        timer.stop();
+        home.removeSelectionListener(selectionListener);
+        if (catalogController != null) {
+            catalogController.removeSelectionListener(catalogSelectionListener);
+        }
+        try {
+            Toolkit.getDefaultToolkit().removeAWTEventListener(inputListener);
+        } catch (SecurityException ignored) {
+        }
+        if (clearAndRestoreHomeSelection && savedHomeSelection != null) {
+            List<Selectable> toRestore = savedHomeSelection;
+            savedHomeSelection = null;
+            Set<Selectable> present = new HashSet<>(home.getSelectableViewableItems());
+            present.addAll(home.getFurniture());
+            present.addAll(home.getRooms());
+            present.addAll(home.getWalls());
+            present.addAll(home.getPolylines());
+            present.addAll(home.getDimensionLines());
+            present.addAll(home.getLabels());
+            List<Selectable> valid = new ArrayList<>(toRestore.size());
+            for (Selectable s : toRestore) {
+                if (present.contains(s)) {
+                    valid.add(s);
                 }
-                home.setSelectedItems(valid);
             }
+            home.setSelectedItems(valid);
         }
     }
 
-    /** Converts a list of catalog pieces into concrete {@link HomePieceOfFurniture} instances. */
     private static List<HomePieceOfFurniture> convertCatalogSelection(List<CatalogPieceOfFurniture> catPieces,
             HomeController hc) {
         if (catPieces == null || catPieces.isEmpty()) {
@@ -370,13 +292,6 @@ final class ObjectPicker {
         return result;
     }
 
-    /**
-     * Converts a single catalog piece of furniture into an appropriate {@link HomePieceOfFurniture}
-     * subtype (e.g. {@link HomeDoorOrWindow}, {@link HomeLight}, {@link HomeShelfUnit}).
-     *
-     * @param hc    parent HomeController (if available, uses its furniture controller factory)
-     * @return the instantiated HomePieceOfFurniture, or {@code null} if input is null
-     */
     static HomePieceOfFurniture createHomePiece(CatalogPieceOfFurniture piece, HomeController hc) {
         if (piece == null) {
             return null;
@@ -386,21 +301,19 @@ final class ObjectPicker {
         }
         if (piece instanceof DoorOrWindow) {
             return new HomeDoorOrWindow((DoorOrWindow) piece);
-        } else if (piece instanceof Light) {
+        }
+        if (piece instanceof Light) {
             return new HomeLight((Light) piece);
-        } else if (piece instanceof ShelfUnit) {
+        }
+        if (piece instanceof ShelfUnit) {
             return new HomeShelfUnit((ShelfUnit) piece);
         }
         return new HomePieceOfFurniture(piece);
     }
 
-    /**
-     * Filters the given list of selected items, returning only top-level {@link HomePieceOfFurniture}
-     * instances while excluding child pieces already contained inside a selected {@link HomeFurnitureGroup}.
-     */
+    /** Filters selected items to top-level furniture pieces, omitting children of already-selected groups. */
     static List<HomePieceOfFurniture> selectedFurniture(List<? extends Selectable> selected) {
         Set<HomePieceOfFurniture> groupChildren = new HashSet<>();
-        // Identify all nested children of selected groups
         for (Selectable item : selected) {
             if (item instanceof HomeFurnitureGroup) {
                 for (HomePieceOfFurniture child : ((HomeFurnitureGroup) item).getFurniture()) {
@@ -408,7 +321,6 @@ final class ObjectPicker {
                 }
             }
         }
-        // Retain only pieces that are not children of another selected group
         List<HomePieceOfFurniture> furniture = new ArrayList<>();
         for (Selectable item : selected) {
             if (item instanceof HomePieceOfFurniture && !groupChildren.contains(item)) {

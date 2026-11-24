@@ -14,8 +14,10 @@ import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.GridLayout;
+import java.awt.Rectangle;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 import javax.swing.BorderFactory;
@@ -35,72 +37,37 @@ import javax.swing.border.LineBorder;
 
 /**
  * The seven types as cards in a horizontal strip, each with its picture (type1.png to type7.png when
- * surrounding outside, type1_in.png to type7_in.png when surrounding inside); the selected card is highlighted and kept in view, with detailed descriptions provided in tooltips.
+ * surrounding outside, type1_in.png to type7_in.png when surrounding inside); the selected card is highlighted and kept in view.
  */
 class TypeCardsPanel extends JPanel {
 
-    /** Radio button for Type 1: Original size with distributed inter-object gaps. */
-    final JRadioButton type1;
-
-    /** Radio button for Type 2: Stretched/compressed to eliminate gaps at joints. */
-    final JRadioButton type2;
-
-    /** Radio button for Type 3: Enlarged uniform size across all sides without gaps. */
-    final JRadioButton type3;
-
-    /** Radio button for Type 4: Reduced uniform size across all sides without gaps. */
-    final JRadioButton type4;
-
-    /** Radio button for Type 5: Aligned layout maintaining unbroken continuity across corners. */
-    final JRadioButton type5;
-
-    /** Radio button for Type 6: Centered layout progressing symmetrically outward from side midpoints. */
-    final JRadioButton type6;
-
-    /** Radio button for Type 7: Discrete spacing interval or explicit object count distribution. */
-    final JRadioButton type7;
-
-    /** Ordered list of radio buttons for index-based access (0 to 6 corresponding to Types 1 to 7). */
+    final JRadioButton type1, type2, type3, type4, type5, type6, type7;
     final List<JRadioButton> typeRadios = new ArrayList<>();
-
-    /** List of card panels corresponding to each surrounding type. */
     private final List<JPanel> typeCards = new ArrayList<>();
-
-    /** Picture labels of the cards, in type order. */
     private final List<JLabel> typeImages = new ArrayList<>();
-
-    /** Whether the pictures currently show the objects placed inside. */
     private boolean inside;
 
-    /** Horizontal scroll pane hosting the card strip. */
-    private final JScrollPane cardsScroll;
-
-    /** Constructs the TypeCardsPanel and initializes the card strip. */
     TypeCardsPanel(UiKit.Texts t, Runnable onTypeChanged) {
         super(new FlowLayout(FlowLayout.LEADING, 0, 0));
-        type1 = new JRadioButton(t.get("type1", "Type 1"), true);
-        type2 = new JRadioButton(t.get("type2", "Type 2"));
-        type3 = new JRadioButton(t.get("type3", "Type 3"));
-        type4 = new JRadioButton(t.get("type4", "Type 4"));
-        type5 = new JRadioButton(t.get("type5", "Type 5"));
-        type6 = new JRadioButton(t.get("type6", "Type 6"));
-        type7 = new JRadioButton(t.get("type7", "Type 7"));
-
+        JRadioButton[] radios = new JRadioButton[7];
         ButtonGroup group = new ButtonGroup();
-        JRadioButton[] radios = {type1, type2, type3, type4, type5, type6, type7};
         JPanel grid = new JPanel(new GridLayout(1, 0, UiKit.GAP, 0));
-        for (int i = 0; i < radios.length; i++) {
+        for (int i = 0; i < 7; i++) {
+            int n = i + 1;
+            radios[i] = new JRadioButton(t.get("type" + n, "Type " + n), i == 0);
             group.add(radios[i]);
             typeRadios.add(radios[i]);
-            grid.add(createTypeCard(radios[i], i + 1, t.get("info" + (i + 1), "")));
+            grid.add(createTypeCard(radios[i], n, t.get("info" + n, "")));
             radios[i].addActionListener(e -> {
                 updateSelection();
                 onTypeChanged.run();
             });
         }
+        type1 = radios[0]; type2 = radios[1]; type3 = radios[2]; type4 = radios[3];
+        type5 = radios[4]; type6 = radios[5]; type7 = radios[6];
 
-        // Place the seven cards in a horizontal scroll pane, sized to show four cards simultaneously
-        cardsScroll = new JScrollPane(grid, ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER,
+        // Sized to show four cards simultaneously
+        JScrollPane cardsScroll = new JScrollPane(grid, ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER,
                 ScrollPaneConstants.HORIZONTAL_SCROLLBAR_ALWAYS);
         cardsScroll.setBorder(BorderFactory.createEmptyBorder());
         cardsScroll.getHorizontalScrollBar().setUnitIncrement(UiKit.CARD_WIDTH / 4);
@@ -111,11 +78,6 @@ class TypeCardsPanel extends JPanel {
         updateSelection();
     }
 
-    /**
-     * Builds an individual clickable card component for a surrounding type.
-     *
-     * @param typeIndex   algorithm type index (1-based, 1 to 7)
-     */
     private JPanel createTypeCard(JRadioButton radioButton, int typeIndex, String info) {
         JPanel card = new JPanel(new BorderLayout(0, 2));
         card.setPreferredSize(new Dimension(UiKit.CARD_WIDTH, 188));
@@ -127,16 +89,14 @@ class TypeCardsPanel extends JPanel {
         radioButton.setFocusPainted(false);
         radioButton.setToolTipText(info);
 
-        // Load illustration image from bundle resources
         JLabel imageLabel = new JLabel(loadTypeImage(typeIndex, false));
         imageLabel.setHorizontalAlignment(SwingConstants.CENTER);
-        typeImages.add(imageLabel);
         imageLabel.setToolTipText(info);
+        typeImages.add(imageLabel);
 
         card.add(radioButton, BorderLayout.NORTH);
         card.add(imageLabel, BorderLayout.CENTER);
 
-        // Allow clicking anywhere on the card or image to select the radio button
         MouseAdapter selectOnClick = new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
@@ -153,28 +113,14 @@ class TypeCardsPanel extends JPanel {
         return card;
     }
 
-    /**
-     * Returns the picture of a type, for objects placed outside or inside.
-     *
-     * @param typeIndex algorithm type index (1-based, 1 to 7)
-     * @param inside    true for the picture with the objects inside
-     * @return the picture, or null if it is missing
-     */
     private static ImageIcon loadTypeImage(int typeIndex, boolean inside) {
-        java.net.URL image = inside
-                ? TypeCardsPanel.class.getResource("type" + typeIndex + "_in.png")
-                : null;
+        URL image = inside ? TypeCardsPanel.class.getResource("type" + typeIndex + "_in.png") : null;
         if (image == null) {
             image = TypeCardsPanel.class.getResource("type" + typeIndex + ".png");
         }
         return image != null ? new ImageIcon(image) : null;
     }
 
-    /**
-     * Shows the pictures for objects placed inside or outside.
-     *
-     * @param inside true when surrounding inside
-     */
     void setInside(boolean inside) {
         if (this.inside != inside) {
             this.inside = inside;
@@ -184,14 +130,12 @@ class TypeCardsPanel extends JPanel {
         }
     }
 
-    /** Synchronizes visual borders and background colors with the active selection. */
     private void updateSelection() {
         for (JPanel card : typeCards) {
             boolean selected = ((JRadioButton) card.getClientProperty("radio")).isSelected();
             if (selected) {
-                card.scrollRectToVisible(new java.awt.Rectangle(0, 0, card.getWidth(), card.getHeight()));
+                card.scrollRectToVisible(new Rectangle(0, 0, card.getWidth(), card.getHeight()));
             }
-            // Accent highlight border for the selected card
             Border outer = selected ? new LineBorder(UiKit.ACCENT, 2, true) : new LineBorder(UiKit.CARD_BORDER, 1, true);
             int pad = selected ? 5 : 6;
             card.setBorder(new CompoundBorder(outer, new EmptyBorder(pad, pad, pad, pad)));
@@ -200,11 +144,6 @@ class TypeCardsPanel extends JPanel {
         }
     }
 
-    /**
-     * Returns the 1-based index of the currently selected surrounding type.
-     *
-     * @return integer between 1 and 7
-     */
     int getSelectedType() {
         for (int i = 0; i < typeRadios.size(); i++) {
             if (typeRadios.get(i).isSelected()) {
@@ -212,16 +151,5 @@ class TypeCardsPanel extends JPanel {
             }
         }
         return 1;
-    }
-
-    /**
-     * Programmatically selects the specified surrounding type.
-     *
-     * @param type 1-based type index (1 to 7)
-     */
-    void setSelectedType(int type) {
-        int idx = Math.max(0, Math.min(typeRadios.size() - 1, type - 1));
-        typeRadios.get(idx).setSelected(true);
-        updateSelection();
     }
 }

@@ -33,7 +33,6 @@ import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.ResourceBundle;
 import java.util.Set;
 import javax.swing.AbstractCellEditor;
@@ -74,11 +73,9 @@ import javax.swing.table.TableColumn;
  */
 public final class SurroundRandomDialog {
 
-    /** Private constructor preventing instantiation of static utility class. */
     private SurroundRandomDialog() {
     }
 
-    /** Property naming lookup table: maps internal property identifier to localization bundle key and fallback text. */
     private static final String[][] PROPERTY_NAMES = {
         {"look", "color_texture", "Color/texture"},
         {"shininess", "shininess", "Shininess"},
@@ -90,7 +87,6 @@ public final class SurroundRandomDialog {
         {"roll", "prop_roll", "Y tilt (roll)"},
         {"angle_jitter", "prop_angle_jitter", "Z orientation offset"}};
 
-    /** Resolves the localized display name for the specified property identifier. */
     public static String propertyDisplayName(ResourceBundle resource, String prop) {
         for (String[] name : PROPERTY_NAMES) {
             if (name[0].equals(prop)) {
@@ -100,12 +96,6 @@ public final class SurroundRandomDialog {
         return UiKit.text(resource, prop, prop);
     }
 
-    /**
-     * Resolves localized labels for the three numerical variation modes:
-     * Absolute Value (0), Additive Offset (1), and Percentage Scaling (2).
-     *
-     * @return array of 3 localized mode strings
-     */
     private static String[] modeLabels(ResourceBundle resource) {
         return new String[]{
             UiKit.text(resource, "randomValue", "Value between"),
@@ -114,11 +104,6 @@ public final class SurroundRandomDialog {
         };
     }
 
-    /**
-     * Resolves the measurement unit symbol for a property.
-     *
-     * @return unit string (e.g. "%", "cm", "&deg;", or empty string)
-     */
     public static String propertyUnit(String prop) {
         if ("shininess".equals(prop) || "light_power".equals(prop)) {
             return "%";
@@ -133,8 +118,8 @@ public final class SurroundRandomDialog {
     }
 
     /**
-     * Filters {@link SurroundRandomSettings#RANDOM_PROPS} to only those properties that are applicable given the
-     * selected template objects, current layout geometry settings, and the counterpart mode's active properties.
+     * Filters {@link SurroundRandomSettings#RANDOM_PROPS} to properties compatible with the selected templates,
+     * current layout geometry, and not already enabled in the counterpart mode.
      */
     public static String[] applicableProperties(List<HomePieceOfFurniture> templatePieces,
                                                 SurroundConfig currentConfig,
@@ -144,39 +129,25 @@ public final class SurroundRandomDialog {
         boolean canResize = MaterialUtils.containsResizable(templatePieces);
 
         int type = currentConfig != null ? currentConfig.surroundType : 1;
-        boolean typeModifiesH = (type == 3 || type == 4 || type == 6) && currentConfig != null
-                && (currentConfig.dimModifyMode == SurroundConfig.DIM_PROPORTIONAL
+        boolean resizes = (type == 3 || type == 4 || type == 6) && currentConfig != null;
+        boolean typeModifiesH = resizes && (currentConfig.dimModifyMode == SurroundConfig.DIM_PROPORTIONAL
                 || (currentConfig.dimModifyMode == SurroundConfig.DIM_SELECTED && currentConfig.dimModifyH));
-        boolean typeModifiesD = (type == 3 || type == 4 || type == 6) && currentConfig != null
-                && (currentConfig.dimModifyMode == SurroundConfig.DIM_PROPORTIONAL
+        boolean typeModifiesD = resizes && (currentConfig.dimModifyMode == SurroundConfig.DIM_PROPORTIONAL
                 || (currentConfig.dimModifyMode == SurroundConfig.DIM_SELECTED && currentConfig.dimModifyD));
-        boolean type7RandomizesH = type == 7 && currentConfig != null
-                && (currentConfig.randomizeAll || currentConfig.randomizeHeight);
-        boolean type7RandomizesD = type == 7 && currentConfig != null
-                && (currentConfig.randomizeAll || currentConfig.randomizeDepth);
-        boolean stackUsesPieceHeight = currentConfig != null && currentConfig.enableVerticalStacking
-                && !currentConfig.useCustomStackElevation;
+        boolean type7RandomizesH = type == 7 && currentConfig != null && (currentConfig.randomizeAll || currentConfig.randomizeHeight);
+        boolean type7RandomizesD = type == 7 && currentConfig != null && (currentConfig.randomizeAll || currentConfig.randomizeDepth);
         boolean stackControlsElevation = currentConfig != null && currentConfig.enableVerticalStacking;
+        boolean stackUsesPieceHeight = stackControlsElevation && !currentConfig.useCustomStackElevation;
         boolean cornerUsesPieceDepth = currentConfig != null && type != 7 && (currentConfig.enableCornerHandling || currentConfig.customSideEnds);
 
         List<String> list = new ArrayList<>();
         for (String p : SurroundRandomSettings.RANDOM_PROPS) {
-            if ("light_power".equals(p) && !hasLight) {
-                continue;
-            }
-            if (("pitch".equals(p) || "roll".equals(p)) && !canTilt) {
-                continue;
-            }
-            if ("height".equals(p) && (!canResize || typeModifiesH || type7RandomizesH || stackUsesPieceHeight)) {
-                continue;
-            }
-            if ("depth".equals(p) && (!canResize || typeModifiesD || type7RandomizesD || cornerUsesPieceDepth)) {
-                continue;
-            }
-            if ("elevation".equals(p) && stackControlsElevation) {
-                continue;
-            }
-            if (otherActiveSettings != null && Boolean.TRUE.equals(otherActiveSettings.enabled.get(p))) {
+            if (("light_power".equals(p) && !hasLight)
+                    || (("pitch".equals(p) || "roll".equals(p)) && !canTilt)
+                    || ("height".equals(p) && (!canResize || typeModifiesH || type7RandomizesH || stackUsesPieceHeight))
+                    || ("depth".equals(p) && (!canResize || typeModifiesD || type7RandomizesD || cornerUsesPieceDepth))
+                    || ("elevation".equals(p) && stackControlsElevation)
+                    || (otherActiveSettings != null && Boolean.TRUE.equals(otherActiveSettings.enabled.get(p)))) {
                 continue;
             }
             list.add(p);
@@ -184,12 +155,6 @@ public final class SurroundRandomDialog {
         return list.toArray(new String[0]);
     }
 
-    /**
-     * Builds and configures the interactive property variation JTable.
-     *
-     * @param gradual        true for gradual dialog, false for random dialog
-     * @param prefs          Sweet Home 3D user preferences
-     */
     private static JTable buildPropertyTable(final ResourceBundle resource, final String[] props,
             final SurroundRandomSettings working, final List<HomePieceOfFurniture> templatePieces,
             final String[] modeLabels, final boolean gradual, final JComboBox<String> patternCombo,
@@ -200,15 +165,8 @@ public final class SurroundRandomDialog {
         final String configureText = UiKit.text(resource, "randomLookConfigure", "Configure\u2026");
 
         final AbstractTableModel model = new AbstractTableModel() {
-            @Override
-            public int getRowCount() {
-                return props.length;
-            }
-
-            @Override
-            public int getColumnCount() {
-                return 6;
-            }
+            @Override public int getRowCount() { return props.length; }
+            @Override public int getColumnCount() { return 6; }
 
             @Override
             public String getColumnName(int col) {
@@ -231,8 +189,7 @@ public final class SurroundRandomDialog {
             @Override
             public Class<?> getColumnClass(int col) {
                 if (col == 0) return Boolean.class;
-                if (col == 4 || col == 5) return Double.class;
-                return String.class;
+                return (col == 4 || col == 5) ? Double.class : String.class;
             }
 
             @Override
@@ -241,16 +198,14 @@ public final class SurroundRandomDialog {
                 if (col == 0) return true;
                 if (!Boolean.TRUE.equals(working.enabled.get(props[row]))) return false;
                 if (col == 2) return SurroundRandomSettings.supportsMaterials(props[row]);
-                if ("look".equals(props[row])) return col == 3;
-                return col >= 3;
+                return "look".equals(props[row]) ? col == 3 : col >= 3;
             }
 
             @Override
             public Object getValueAt(int row, int col) {
                 String p = props[row];
                 switch (col) {
-                    case 0:
-                        return working.enabled.get(p);
+                    case 0: return working.enabled.get(p);
                     case 1: {
                         String unit = propertyUnit(p);
                         String label = propertyDisplayName(resource, p);
@@ -275,12 +230,9 @@ public final class SurroundRandomDialog {
                             return formatLookSummary(resource, working.look);
                         }
                         return modeLabels[working.modes.get(p)];
-                    case 4:
-                        return (!Boolean.TRUE.equals(working.enabled.get(p)) || "look".equals(p)) ? null : working.mins.get(p);
-                    case 5:
-                        return (!Boolean.TRUE.equals(working.enabled.get(p)) || "look".equals(p)) ? null : working.maxs.get(p);
-                    default:
-                        return null;
+                    case 4: return (!Boolean.TRUE.equals(working.enabled.get(p)) || "look".equals(p)) ? null : working.mins.get(p);
+                    case 5: return (!Boolean.TRUE.equals(working.enabled.get(p)) || "look".equals(p)) ? null : working.maxs.get(p);
+                    default: return null;
                 }
             }
 
@@ -299,16 +251,13 @@ public final class SurroundRandomDialog {
                                 : next == SurroundRandomSettings.MODE_ADD ? (gradual ? 20.0 : 0.0) : 100.0);
                         fireTableRowsUpdated(row, row);
                     }
-                } else if (col == 4 && val instanceof Number) {
-                    working.mins.put(p, clampFor(p, working.modes.get(p), ((Number) val).doubleValue()));
-                } else if (col == 5 && val instanceof Number) {
-                    working.maxs.put(p, clampFor(p, working.modes.get(p), ((Number) val).doubleValue()));
+                } else if ((col == 4 || col == 5) && val instanceof Number) {
+                    (col == 4 ? working.mins : working.maxs).put(p, clampFor(p, working.modes.get(p), ((Number) val).doubleValue()));
                 }
             }
         };
 
         final JTable table = createEditableTable(model, 26, true);
-
         checkColumn(table);
         columnWidths(table, 34, gradual ? 165 : 150, 130, 190, 75, 75);
 
@@ -318,8 +267,7 @@ public final class SurroundRandomDialog {
             @Override
             public Component getTableCellRendererComponent(JTable tbl, Object value, boolean isSelected,
                     boolean hasFocus, int row, int column) {
-                String p = props[row];
-                if (Boolean.TRUE.equals(working.enabled.get(p)) && SurroundRandomSettings.supportsMaterials(p)) {
+                if (Boolean.TRUE.equals(working.enabled.get(props[row])) && SurroundRandomSettings.supportsMaterials(props[row])) {
                     button.setText(value != null ? value.toString() + " \u2026" : wholeText);
                     button.setHorizontalAlignment(SwingConstants.LEFT);
                     button.setMargin(new Insets(1, 6, 1, 6));
@@ -328,7 +276,7 @@ public final class SurroundRandomDialog {
                 return super.getTableCellRendererComponent(tbl, "", isSelected, hasFocus, row, column);
             }
         });
-        table.getColumnModel().getColumn(2).setCellEditor(new ButtonLaunchEditor(table, row -> {
+        table.getColumnModel().getColumn(2).setCellEditor(new ButtonLaunchEditor(row -> {
             String p = props[row];
             if (SurroundRandomSettings.supportsMaterials(p)) {
                 showRandomTargetDialog(table, resource, p, working, templatePieces);
@@ -337,14 +285,14 @@ public final class SurroundRandomDialog {
         }));
 
         final DefaultCellEditor comboEditor = new DefaultCellEditor(new JComboBox<>(modeLabels));
-        final ButtonLaunchEditor lookEditor = new ButtonLaunchEditor(table, row -> {
+        final ButtonLaunchEditor lookEditor = new ButtonLaunchEditor(row -> {
             if (gradual) {
-                Color initStart = new Color(working.look.startColor != null ? working.look.startColor : 0x3A7BD5);
-                Color c0 = JColorChooser.showDialog(table, UiKit.text(resource, "gradualPickStartColor", "Start color"), initStart);
+                Color c0 = JColorChooser.showDialog(table, UiKit.text(resource, "gradualPickStartColor", "Start color"),
+                        new Color(working.look.startColor != null ? working.look.startColor : 0x3A7BD5));
                 if (c0 != null) {
                     working.look.startColor = c0.getRGB() & 0xFFFFFF;
-                    Color initEnd = new Color(working.look.endColor != null ? working.look.endColor : 0xE67E22);
-                    Color c1 = JColorChooser.showDialog(table, UiKit.text(resource, "gradualPickEndColor", "End color"), initEnd);
+                    Color c1 = JColorChooser.showDialog(table, UiKit.text(resource, "gradualPickEndColor", "End color"),
+                            new Color(working.look.endColor != null ? working.look.endColor : 0xE67E22));
                     if (c1 != null) {
                         working.look.endColor = c1.getRGB() & 0xFFFFFF;
                     }
@@ -415,24 +363,19 @@ public final class SurroundRandomDialog {
                 return lbl;
             }
         };
-        table.getColumnModel().getColumn(4).setCellRenderer(numRenderer);
-        table.getColumnModel().getColumn(5).setCellRenderer(numRenderer);
         for (int column = 4; column <= 5; column++) {
             boolean isMin = column == 4;
-            table.getColumnModel().getColumn(column).setCellEditor(new NumberEditor((row, value) -> {
+            TableColumn col = table.getColumnModel().getColumn(column);
+            col.setCellRenderer(numRenderer);
+            col.setCellEditor(new NumberEditor((row, value) -> {
                 String p = props[row];
-                double[] limits = limits(p, working.modes.get(p));
-                return new double[]{isMin ? working.mins.get(p) : working.maxs.get(p), limits[0], limits[1], limits[2]};
+                double[] lim = limits(p, working.modes.get(p));
+                return new double[]{isMin ? working.mins.get(p) : working.maxs.get(p), lim[0], lim[1], lim[2]};
             }));
         }
         return table;
     }
 
-    /**
-     * Displays the modal configuration dialog for stochastic (random) property variations.
-     *
-     * @return true if user confirmed dialog with OK, false if cancelled
-     */
     public static boolean showRandomDialog(Component parent, ResourceBundle resource,
                                            UserPreferences prefs, HomeController homeController,
                                            SurroundRandomSettings randomRanges,
@@ -440,22 +383,20 @@ public final class SurroundRandomDialog {
                                            SurroundConfig currentConfig,
                                            SurroundRandomSettings activeGradualSettings) {
         final String[] props = applicableProperties(templatePieces, currentConfig, activeGradualSettings);
-        final String[] modeLabels = modeLabels(resource);
         final SurroundRandomSettings working = randomRanges.copy();
         if (!MaterialUtils.containsLight(templatePieces)) {
             working.enabled.put("light_power", false);
         }
-        final JTable table = buildPropertyTable(resource, props, working, templatePieces, modeLabels, false, null, prefs, homeController);
+        final JTable table = buildPropertyTable(resource, props, working, templatePieces,
+                modeLabels(resource), false, null, prefs, homeController);
 
         final JCheckBox objectSubsetCheck = new JCheckBox(
                 UiKit.text(resource, "randomObjectSubset", "Apply to random objects of the surround, probability:"),
                 working.randomObjectSubset);
         final JSpinner objectProbSpinner = UiKit.spinner(new SpinnerNumberModel(working.objectProbability, 0.0, 100.0, 5.0), 4);
-        JPanel objectSubsetRow = probabilityRow(objectSubsetCheck, objectProbSpinner);
         final JCheckBox mirrorCheck = new JCheckBox(
                 UiKit.text(resource, "randomMirror", "Random mirroring, probability:"), working.mirror);
         final JSpinner mirrorProbSpinner = UiKit.spinner(new SpinnerNumberModel(working.mirrorProbability, 0.0, 100.0, 5.0), 4);
-        JPanel mirrorRow = probabilityRow(mirrorCheck, mirrorProbSpinner);
 
         final JCheckBox stackRandomCheck = new JCheckBox(
                 UiKit.text(resource, "randomStackIndependent", "Draw separately for each vertically stacked level"),
@@ -472,7 +413,10 @@ public final class SurroundRandomDialog {
 
         JPanel southPanel = new JPanel();
         southPanel.setLayout(new BoxLayout(southPanel, BoxLayout.Y_AXIS));
-        for (JComponent comp : new JComponent[]{objectSubsetRow, mirrorRow, surroundExtrasRow}) {
+        for (JComponent comp : new JComponent[]{
+                probabilityRow(objectSubsetCheck, objectProbSpinner),
+                probabilityRow(mirrorCheck, mirrorProbSpinner),
+                surroundExtrasRow}) {
             comp.setAlignmentX(Component.LEFT_ALIGNMENT);
             southPanel.add(comp);
         }
@@ -485,10 +429,7 @@ public final class SurroundRandomDialog {
         panel.add(scroll, BorderLayout.CENTER);
         panel.add(southPanel, BorderLayout.SOUTH);
 
-        int res = JOptionPane.showConfirmDialog(parent, panel,
-                UiKit.text(resource, "randomTitle", "Random property variations"),
-                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
-        if (res == JOptionPane.OK_OPTION) {
+        if (confirmDialog(parent, panel, UiKit.text(resource, "randomTitle", "Random property variations"))) {
             stopEditing(table);
             working.randomObjectSubset = objectSubsetCheck.isSelected();
             working.objectProbability = ((Number) objectProbSpinner.getValue()).doubleValue();
@@ -511,7 +452,6 @@ public final class SurroundRandomDialog {
                 && (config.surroundType == 7 || config.placeOrthogonalCornerPiece));
     }
 
-    /** A check box followed by its probability, shown only while it's checked. */
     private static JPanel probabilityRow(JCheckBox check, JSpinner probability) {
         JLabel percent = new JLabel("%");
         Runnable sync = () -> {
@@ -524,11 +464,6 @@ public final class SurroundRandomDialog {
         return UiKit.row(4, check, probability, percent);
     }
 
-    /**
-     * Displays the modal configuration dialog for deterministic gradual property changes.
-     *
-     * @return true if user confirmed with OK, false if cancelled
-     */
     public static boolean showGradualDialog(Component parent, ResourceBundle resource,
                                             UserPreferences prefs, HomeController homeController,
                                             SurroundRandomSettings gradualSettings,
@@ -536,7 +471,6 @@ public final class SurroundRandomDialog {
                                             SurroundConfig currentConfig,
                                             SurroundRandomSettings activeRandomSettings) {
         final String[] props = applicableProperties(templatePieces, currentConfig, activeRandomSettings);
-        final String[] modeLabels = modeLabels(resource);
         final SurroundRandomSettings working = gradualSettings.copy();
         final String[] patternNames = {
             UiKit.text(resource, "gradualLinear", "Linear (start to end)"),
@@ -557,7 +491,8 @@ public final class SurroundRandomDialog {
                 ? SurroundRandomSettings.SCOPE_WHOLE_OUTLINE : working.gradualScope;
         scopeCombo.setSelectedIndex(Math.max(0, Math.min(scopeNames.length - 1, initScope)));
 
-        final JTable table = buildPropertyTable(resource, props, working, templatePieces, modeLabels, true, patternCombo, prefs, homeController);
+        final JTable table = buildPropertyTable(resource, props, working, templatePieces,
+                modeLabels(resource), true, patternCombo, prefs, homeController);
         patternCombo.addActionListener(e -> {
             working.gradualPattern = patternCombo.getSelectedIndex();
             table.getColumnModel().getColumn(5).setHeaderValue(table.getModel().getColumnName(5));
@@ -587,10 +522,7 @@ public final class SurroundRandomDialog {
             panel.add(cornerGradualCheck, BorderLayout.SOUTH);
         }
 
-        int res = JOptionPane.showConfirmDialog(parent, panel,
-                UiKit.text(resource, "gradualTitle", "Gradual property changes"),
-                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
-        if (res == JOptionPane.OK_OPTION) {
+        if (confirmDialog(parent, panel, UiKit.text(resource, "gradualTitle", "Gradual property changes"))) {
             stopEditing(table);
             working.gradualPattern = patternCombo.getSelectedIndex();
             working.gradualScope = scopeCombo.getSelectedIndex();
@@ -612,15 +544,11 @@ public final class SurroundRandomDialog {
         return parts.isEmpty() ? "\u2014" : String.join(" + ", parts);
     }
 
-    /**
-     * Displays a dialog allowing the user to choose whether a property variation applies to the whole object
-     * or to specific extracted material parts of the template pieces.
-     */
     public static void showRandomTargetDialog(Component parent, ResourceBundle resource, String property,
                                               SurroundRandomSettings working, List<HomePieceOfFurniture> templatePieces) {
-        String propLabel = propertyDisplayName(resource, property);
         String title = MessageFormat.format(
-                UiKit.text(resource, "randomTargetTitle", "Random values of {0}: materials"), propLabel);
+                UiKit.text(resource, "randomTargetTitle", "Random values of {0}: materials"),
+                propertyDisplayName(resource, property));
 
         List<HomePieceOfFurniture> repTop = MaterialUtils.topPiecesOf(templatePieces);
         Map<HomePieceOfFurniture, Set<String>> initByPiece = new IdentityHashMap<>();
@@ -636,9 +564,9 @@ public final class SurroundRandomDialog {
             initByPiece.put(p, init);
         }
         final MultiPieceTableGroup repGroup = buildMultiPieceTableGroup(
-                resource, repTop, property, false, initByPiece, repTop.isEmpty()
+                resource, repTop, property, initByPiece, repTop.isEmpty()
                         ? UiKit.text(resource, "noReplacementMaterials", "Select the object first to list its materials.")
-                        : UiKit.text(resource, "noModelMaterials", "The materials of this object couldn't be read."), null);
+                        : UiKit.text(resource, "noModelMaterials", "The materials of this object couldn't be read."));
 
         boolean initialWhole = working.isWholeTarget(property) || !repGroup.hasAnyMaterials();
         final JRadioButton wholeBtn = new JRadioButton(
@@ -674,9 +602,7 @@ public final class SurroundRandomDialog {
         panel.add(top, BorderLayout.NORTH);
         panel.add(repGroup.component, BorderLayout.CENTER);
 
-        int res = JOptionPane.showConfirmDialog(parent, panel, title,
-                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
-        if (res == JOptionPane.OK_OPTION) {
+        if (confirmDialog(parent, panel, title)) {
             Map<HomePieceOfFurniture, Set<String>> chosenByPiece = repGroup.checkedByPiece();
             Set<String> union = repGroup.unionChecked();
             boolean useWhole = wholeBtn.isSelected() || union.isEmpty();
@@ -696,11 +622,6 @@ public final class SurroundRandomDialog {
         }
     }
 
-    /**
-     * Displays a dialog for configuring weighted color/texture lists and RGB component variation.
-     *
-     * @return true if user confirmed with OK, false if cancelled
-     */
     public static boolean showRandomLookDialog(Component parent, ResourceBundle resource,
                                                UserPreferences prefs, HomeController homeController,
                                                SurroundRandomSettings.RandomLook look) {
@@ -731,22 +652,14 @@ public final class SurroundRandomDialog {
             @Override public int getColumnCount() { return 4; }
             @Override public String getColumnName(int c) { return cols[c]; }
             @Override public Class<?> getColumnClass(int c) { return c >= 2 ? Double.class : String.class; }
-
-            @Override
-            public boolean isCellEditable(int r, int c) {
-                if (!varyCheck.isSelected() || c == 0) {
-                    return false;
-                }
-                return !(sameCheck.isSelected() && r > 0);
-            }
+            @Override public boolean isCellEditable(int r, int c) { return varyCheck.isSelected() && c != 0 && !(sameCheck.isSelected() && r > 0); }
 
             @Override
             public Object getValueAt(int r, int c) {
                 int src = (sameCheck.isSelected() && r > 0) ? 0 : r;
                 if (c == 0) return compLabels[r];
                 if (c == 1) return modeLabels[working.modes[src]];
-                if (c == 2) return working.mins[src];
-                return working.maxs[src];
+                return c == 2 ? working.mins[src] : working.maxs[src];
             }
 
             @Override
@@ -759,29 +672,23 @@ public final class SurroundRandomDialog {
                         working.maxs[r] = next == SurroundRandomSettings.MODE_PERCENT ? 120.0 : next == SurroundRandomSettings.MODE_ADD ? 30.0 : 255.0;
                         fireTableDataChanged();
                     }
-                } else if (c == 2 && val instanceof Number) {
-                    working.mins[r] = clampRgb(working.modes[r], ((Number) val).doubleValue());
-                    fireTableDataChanged();
-                } else if (c == 3 && val instanceof Number) {
-                    working.maxs[r] = clampRgb(working.modes[r], ((Number) val).doubleValue());
+                } else if ((c == 2 || c == 3) && val instanceof Number) {
+                    (c == 2 ? working.mins : working.maxs)[r] = clampRgb(working.modes[r], ((Number) val).doubleValue());
                     fireTableDataChanged();
                 }
             }
         };
 
         final JTable compTable = createEditableTable(compModel, 24, false);
-
         DefaultTableCellRenderer compNumRenderer = new DefaultTableCellRenderer() {
             @Override
             public Component getTableCellRendererComponent(JTable tbl, Object value, boolean isSelected,
                                                            boolean hasFocus, int row, int column) {
                 int src = (sameCheck.isSelected() && row > 0) ? 0 : row;
-                String text = "";
-                if (value instanceof Number) {
-                    double d = ((Number) value).doubleValue();
-                    String u = working.modes[src] == SurroundRandomSettings.MODE_PERCENT ? " %" : "";
-                    text = String.format("%.0f%s", d, u);
-                }
+                String text = value instanceof Number
+                        ? String.format("%.0f%s", ((Number) value).doubleValue(),
+                                working.modes[src] == SurroundRandomSettings.MODE_PERCENT ? " %" : "")
+                        : "";
                 JLabel lbl = (JLabel) super.getTableCellRendererComponent(tbl, text, isSelected, hasFocus, row, column);
                 lbl.setHorizontalAlignment(SwingConstants.RIGHT);
                 return lbl;
@@ -793,10 +700,11 @@ public final class SurroundRandomDialog {
             compTable.getColumnModel().getColumn(1).setCellEditor(new DefaultCellEditor(new JComboBox<>(modeLabels)));
             for (int column = 2; column <= 3; column++) {
                 boolean isMin = column == 2;
-                compTable.getColumnModel().getColumn(column).setCellRenderer(compNumRenderer);
-                compTable.getColumnModel().getColumn(column).setCellEditor(new NumberEditor((row, value) -> {
-                    double[] limits = rgbLimits(working.modes[row]);
-                    return new double[]{isMin ? working.mins[row] : working.maxs[row], limits[0], limits[1], 5.0};
+                TableColumn col = compTable.getColumnModel().getColumn(column);
+                col.setCellRenderer(compNumRenderer);
+                col.setCellEditor(new NumberEditor((row, value) -> {
+                    double[] lim = rgbLimits(working.modes[row]);
+                    return new double[]{isMin ? working.mins[row] : working.maxs[row], lim[0], lim[1], 5.0};
                 }));
             }
         };
@@ -809,16 +717,13 @@ public final class SurroundRandomDialog {
                 UiKit.text(resource, "randomFromList", "Draw a color or texture from this list:"), working.fromList);
         final ChoiceTableModel choiceModel = new ChoiceTableModel(resource, working.choices);
         final JTable choiceTable = createEditableTable(choiceModel, 26, true);
-        choiceTable.getColumnModel().getColumn(0).setMinWidth(32);
-        choiceTable.getColumnModel().getColumn(0).setMaxWidth(36);
+        checkColumn(choiceTable);
         choiceTable.getColumnModel().getColumn(0).setCellRenderer(new IconRenderer());
-        choiceTable.getColumnModel().getColumn(2).setPreferredWidth(75);
+        columnWidths(choiceTable, 34, 240, 75, 85, 60);
         choiceTable.getColumnModel().getColumn(2).setMaxWidth(90);
         choiceTable.getColumnModel().getColumn(2).setCellEditor(new NumberEditor((row, value) -> new double[]{
                 value instanceof Number ? ((Number) value).doubleValue() : 1.0, 0.0, 1000.0, 0.5}));
-        choiceTable.getColumnModel().getColumn(3).setPreferredWidth(85);
         choiceTable.getColumnModel().getColumn(3).setMaxWidth(100);
-        choiceTable.getColumnModel().getColumn(4).setPreferredWidth(60);
         choiceTable.getColumnModel().getColumn(4).setMaxWidth(75);
         DefaultTableCellRenderer rightRenderer = new DefaultTableCellRenderer();
         rightRenderer.setHorizontalAlignment(SwingConstants.RIGHT);
@@ -830,11 +735,9 @@ public final class SurroundRandomDialog {
 
         final JButton addColorBtn = new JButton(UiKit.text(resource, "randomAddColor", "Add color\u2026"));
         addColorBtn.addActionListener(e -> {
-            Color initial = Color.LIGHT_GRAY;
             int sel = choiceTable.getSelectedRow();
-            if (sel >= 0 && sel < working.choices.size() && working.choices.get(sel).color != null) {
-                initial = new Color(working.choices.get(sel).color);
-            }
+            Color initial = (sel >= 0 && sel < working.choices.size() && working.choices.get(sel).color != null)
+                    ? new Color(working.choices.get(sel).color) : Color.LIGHT_GRAY;
             Color picked = JColorChooser.showDialog(choiceTable, UiKit.text(resource, "color_texture", "Color/texture"), initial);
             if (picked != null) {
                 working.choices.add(new SurroundRandomSettings.RandomLook.Choice(picked.getRGB() & 0xFFFFFF));
@@ -842,7 +745,6 @@ public final class SurroundRandomDialog {
             }
         });
 
-        final TextureChoiceController[] texCtrlHolder = new TextureChoiceController[1];
         JComponent texButtonsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
         if (prefs != null) {
             try {
@@ -852,7 +754,6 @@ public final class SurroundRandomDialog {
                 final TextureChoiceController tc = new TextureChoiceController(
                         UiKit.text(resource, "color_texture", "Color/texture"), prefs,
                         new com.eteks.sweethome3d.swing.SwingViewFactory(), cm);
-                texCtrlHolder[0] = tc;
                 tc.addPropertyChangeListener(TextureChoiceController.Property.TEXTURE, new PropertyChangeListener() {
                     private boolean resetting;
                     @Override
@@ -907,9 +808,10 @@ public final class SurroundRandomDialog {
         varyBox.add(compScroll, BorderLayout.CENTER);
 
         JPanel listBox = new JPanel(new BorderLayout(0, 4));
-        JPanel listHeader = UiKit.row(4, fromListCheck,
-                UiKit.infoIcon(UiKit.text(resource, "randomListHint", "Double weight appears twice as often. Colors with \"Vary\" checked also receive R, G, B variation.")));
-        listBox.add(listHeader, BorderLayout.NORTH);
+        listBox.add(UiKit.row(4, fromListCheck,
+                UiKit.infoIcon(UiKit.text(resource, "randomListHint",
+                        "Double weight appears twice as often. Colors with \"Vary\" checked also receive R, G, B variation."))),
+                BorderLayout.NORTH);
         listBox.add(choiceScroll, BorderLayout.CENTER);
         listBox.add(listButtons, BorderLayout.SOUTH);
 
@@ -937,10 +839,7 @@ public final class SurroundRandomDialog {
         main.add(listBox, BorderLayout.NORTH);
         main.add(varyBox, BorderLayout.CENTER);
 
-        int res = JOptionPane.showConfirmDialog(parent, main,
-                UiKit.text(resource, "randomLookTitle", "Random color/texture"),
-                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
-        if (res == JOptionPane.OK_OPTION) {
+        if (confirmDialog(parent, main, UiKit.text(resource, "randomLookTitle", "Random color/texture"))) {
             stopEditing(compTable, choiceTable);
             look.copyFrom(working);
             look.initialized = true;
@@ -949,7 +848,11 @@ public final class SurroundRandomDialog {
         return false;
     }
 
-    /** Creates a JTable preconfigured with row height, viewport fill, and focus-lost edit commit. */
+    private static boolean confirmDialog(Component parent, JComponent content, String title) {
+        return JOptionPane.showConfirmDialog(parent, content, title,
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE) == JOptionPane.OK_OPTION;
+    }
+
     private static JTable createEditableTable(AbstractTableModel model, int rowHeight, boolean singleSelection) {
         JTable table = new JTable(model);
         table.setRowHeight(rowHeight);
@@ -961,7 +864,6 @@ public final class SurroundRandomDialog {
         return table;
     }
 
-    /** Resolves the mode index matching a localized label, or returns {@code fallback}. */
     private static int findModeIndex(String[] modeLabels, Object val, int fallback) {
         for (int i = 0; i < modeLabels.length; i++) {
             if (modeLabels[i].equals(val)) {
@@ -971,12 +873,6 @@ public final class SurroundRandomDialog {
         return fallback;
     }
 
-    /**
-     * Resolves the bounding limits {min, max, step} of a property for the given variation mode.
-     *
-     * @param mode mode index (Value, Add, Percent)
-     * @return array [min, max, step]
-     */
     static double[] limits(String prop, int mode) {
         if (mode == SurroundRandomSettings.MODE_PERCENT) {
             return new double[]{0.0, 1000.0, 5.0};
@@ -994,29 +890,21 @@ public final class SurroundRandomDialog {
         return new double[]{-10000.0, 10000.0, 1.0};
     }
 
-    /** Clamps a property value to legal limits for its mode. */
     static double clampFor(String prop, int mode, double v) {
-        double[] limits = limits(prop, mode);
-        return Math.max(limits[0], Math.min(limits[1], v));
+        double[] lim = limits(prop, mode);
+        return Math.max(lim[0], Math.min(lim[1], v));
     }
 
-    /**
-     * Resolves bounding limits {min, max} for RGB color components under the given mode.
-     *
-     * @return array [min, max]
-     */
     private static double[] rgbLimits(int mode) {
         return new double[]{mode == SurroundRandomSettings.MODE_ADD ? -255.0 : 0.0,
                 mode == SurroundRandomSettings.MODE_PERCENT ? 1000.0 : 255.0};
     }
 
-    /** Clamps an RGB color component value to legal range and rounds to nearest integer. */
     static double clampRgb(int mode, double v) {
-        double[] limits = rgbLimits(mode);
-        return Math.max(limits[0], Math.min(limits[1], Math.rint(v)));
+        double[] lim = rgbLimits(mode);
+        return Math.max(lim[0], Math.min(lim[1], Math.rint(v)));
     }
 
-    /** Concludes any active cell editing on the given tables. */
     private static void stopEditing(JTable... tables) {
         for (JTable table : tables) {
             if (table.isEditing()) {
@@ -1025,14 +913,12 @@ public final class SurroundRandomDialog {
         }
     }
 
-    /** Sets preferred column widths across table columns. */
     private static void columnWidths(JTable table, int... widths) {
         for (int i = 0; i < widths.length; i++) {
             table.getColumnModel().getColumn(i).setPreferredWidth(widths[i]);
         }
     }
 
-    /** Sets fixed narrow width for the leading checkbox column. */
     private static void checkColumn(JTable table) {
         TableColumn column = table.getColumnModel().getColumn(0);
         column.setMinWidth(32);
@@ -1040,9 +926,6 @@ public final class SurroundRandomDialog {
         column.setPreferredWidth(34);
     }
 
-    // --- Helper table models and cell editors ---
-
-    /** Container coordinating multi-piece tabbed material tables. */
     private static final class MultiPieceTableGroup {
         final JComponent component;
         final Map<HomePieceOfFurniture, CheckTableModel> modelsByPiece = new IdentityHashMap<>();
@@ -1078,21 +961,20 @@ public final class SurroundRandomDialog {
     }
 
     private static MultiPieceTableGroup buildMultiPieceTableGroup(
-            ResourceBundle resource, List<HomePieceOfFurniture> pieces, String property, boolean forOrigin,
-            Map<HomePieceOfFurniture, Set<String>> initialCheckedByPiece, String emptyText,
-            Runnable onSelectionChange) {
+            ResourceBundle resource, List<HomePieceOfFurniture> pieces, String property,
+            Map<HomePieceOfFurniture, Set<String>> initialCheckedByPiece, String emptyText) {
         JTabbedPane tabs = pieces.size() > 1 ? new JTabbedPane(JTabbedPane.TOP, JTabbedPane.SCROLL_TAB_LAYOUT) : null;
         Map<HomePieceOfFurniture, CheckTableModel> models = new IdentityHashMap<>();
         JComponent single = null;
         int idx = 1;
         for (HomePieceOfFurniture piece : pieces.isEmpty() ? Collections.<HomePieceOfFurniture>singletonList(null) : pieces) {
             List<MaterialUtils.PieceMaterial> mats = piece != null
-                    ? MaterialUtils.pieceMaterialsOf(piece, property, forOrigin)
+                    ? MaterialUtils.pieceMaterialsOf(piece, property, false)
                     : Collections.<MaterialUtils.PieceMaterial>emptyList();
             Set<String> init = piece != null && initialCheckedByPiece != null
                     ? initialCheckedByPiece.get(piece) : Collections.<String>emptySet();
             CheckTableModel model = new CheckTableModel(resource, mats, property, init);
-            single = wrapMaterialTable(buildMaterialCheckTable(model, mats, property, onSelectionChange), mats.isEmpty(), emptyText);
+            single = wrapMaterialTable(buildMaterialCheckTable(model, mats, property), mats.isEmpty(), emptyText);
             if (piece != null) {
                 models.put(piece, model);
             }
@@ -1119,11 +1001,10 @@ public final class SurroundRandomDialog {
         return sp;
     }
 
-    private static JTable buildMaterialCheckTable(final CheckTableModel model,
-                                                  final List<MaterialUtils.PieceMaterial> mats,
-                                                  final String property,
-                                                  final Runnable onSelectionChange) {
-        final JTable table = new JTable(model);
+    private static JTable buildMaterialCheckTable(CheckTableModel model,
+                                                  List<MaterialUtils.PieceMaterial> mats,
+                                                  String property) {
+        JTable table = new JTable(model);
         table.setRowHeight(52);
         table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         table.setFillsViewportHeight(true);
@@ -1140,29 +1021,13 @@ public final class SurroundRandomDialog {
             public Component getTableCellRendererComponent(JTable tbl, Object value, boolean isSelected,
                                                            boolean hasFocus, int row, int column) {
                 JLabel lbl = (JLabel) super.getTableCellRendererComponent(tbl, value, isSelected, hasFocus, row, column);
-                if (row >= 0 && row < mats.size()) {
-                    lbl.setIcon(MaterialUtils.swatchIcon(mats.get(row), property));
-                } else {
-                    lbl.setIcon(null);
-                }
+                lbl.setIcon(row >= 0 && row < mats.size() ? MaterialUtils.swatchIcon(mats.get(row), property) : null);
                 return lbl;
             }
         });
-        if (onSelectionChange != null) {
-            table.getSelectionModel().addListSelectionListener(e -> {
-                if (!e.getValueIsAdjusting()) {
-                    onSelectionChange.run();
-                }
-            });
-            model.addTableModelListener(e -> onSelectionChange.run());
-        }
         return table;
     }
 
-    /**
-     * Table model presenting a checklist of materials extracted from a furniture piece,
-     * including visual thumbnail previews and current property swatch icons.
-     */
     private static final class CheckTableModel extends AbstractTableModel {
         private final List<MaterialUtils.PieceMaterial> items;
         private final boolean[] checked;
@@ -1195,18 +1060,8 @@ public final class SurroundRandomDialog {
         @Override public int getRowCount() { return items.size(); }
         @Override public int getColumnCount() { return columns.length; }
         @Override public String getColumnName(int col) { return columns[col]; }
-
-        @Override
-        public Class<?> getColumnClass(int col) {
-            if (col == 0) return Boolean.class;
-            if (col == 1) return Icon.class;
-            return String.class;
-        }
-
-        @Override
-        public boolean isCellEditable(int row, int col) {
-            return col == 0;
-        }
+        @Override public Class<?> getColumnClass(int col) { return col == 0 ? Boolean.class : col == 1 ? Icon.class : String.class; }
+        @Override public boolean isCellEditable(int row, int col) { return col == 0; }
 
         @Override
         public Object getValueAt(int row, int col) {
@@ -1239,7 +1094,6 @@ public final class SurroundRandomDialog {
         }
     }
 
-    /** Table model backing the weighted selection list for stochastic colors and textures. */
     private static final class ChoiceTableModel extends AbstractTableModel {
         private final List<SurroundRandomSettings.RandomLook.Choice> choices;
         private final String[] cols;
@@ -1259,54 +1113,37 @@ public final class SurroundRandomDialog {
         @Override public int getRowCount() { return choices.size(); }
         @Override public int getColumnCount() { return cols.length; }
         @Override public String getColumnName(int c) { return cols[c]; }
-
-        @Override
-        public Class<?> getColumnClass(int c) {
-            if (c == 0) return Icon.class;
-            if (c == 2) return Double.class;
-            if (c == 4) return Boolean.class;
-            return String.class;
-        }
-
-        @Override
-        public boolean isCellEditable(int r, int c) {
-            if (c == 2) return true;
-            if (c == 4) return choices.get(r).color != null;
-            return false;
-        }
+        @Override public Class<?> getColumnClass(int c) { return c == 0 ? Icon.class : c == 2 ? Double.class : c == 4 ? Boolean.class : String.class; }
+        @Override public boolean isCellEditable(int r, int c) { return c == 2 || (c == 4 && choices.get(r).color != null); }
 
         @Override
         public Object getValueAt(int r, int c) {
             SurroundRandomSettings.RandomLook.Choice ch = choices.get(r);
-            if (c == 0) {
-                if (ch.texture != null) {
-                    return texIcons.computeIfAbsent(ch.texture, t -> MaterialUtils.loadTextureIcon(t.getImage(), 18));
-                }
-                if (ch.color != null) {
-                    return new MaterialUtils.ColorIcon(new Color(ch.color));
-                }
-                return null;
-            }
-            if (c == 1) {
-                if (ch.texture != null) {
-                    return ch.texture.getName();
-                }
-                return ch.color != null ? String.format("#%06X", ch.color & 0xFFFFFF) : "";
-            }
-            if (c == 2) {
-                return ch.weight;
-            }
-            if (c == 3) {
-                double total = 0;
-                for (SurroundRandomSettings.RandomLook.Choice x : choices) {
-                    if (x.weight > 0) {
-                        total += x.weight;
+            switch (c) {
+                case 0:
+                    if (ch.texture != null) {
+                        return texIcons.computeIfAbsent(ch.texture, t -> MaterialUtils.loadTextureIcon(t.getImage(), 18));
                     }
+                    return ch.color != null ? new MaterialUtils.ColorIcon(new Color(ch.color)) : null;
+                case 1:
+                    if (ch.texture != null) {
+                        return ch.texture.getName();
+                    }
+                    return ch.color != null ? String.format("#%06X", ch.color & 0xFFFFFF) : "";
+                case 2:
+                    return ch.weight;
+                case 3: {
+                    double total = 0;
+                    for (SurroundRandomSettings.RandomLook.Choice x : choices) {
+                        if (x.weight > 0) {
+                            total += x.weight;
+                        }
+                    }
+                    return String.format("%.1f %%", total > 0 && ch.weight > 0 ? (ch.weight * 100.0 / total) : 0.0);
                 }
-                double pct = total > 0 && ch.weight > 0 ? (ch.weight * 100.0 / total) : 0.0;
-                return String.format("%.1f %%", pct);
+                default:
+                    return ch.color != null && ch.vary;
             }
-            return ch.color != null && ch.vary;
         }
 
         @Override
@@ -1321,18 +1158,16 @@ public final class SurroundRandomDialog {
         }
     }
 
-    /** Picker interface dynamically selecting the appropriate TableCellEditor for a given row. */
     private interface RowEditorPicker {
         TableCellEditor pick(int row);
     }
 
-    /** TableCellEditor that displays a button launching specialized dialogs upon activation. */
     private static final class ButtonLaunchEditor extends AbstractCellEditor implements TableCellEditor {
         private final JButton button = new JButton();
         private final java.util.function.IntConsumer onLaunch;
         private int currentRow = -1;
 
-        ButtonLaunchEditor(final JTable table, final java.util.function.IntConsumer onLaunch) {
+        ButtonLaunchEditor(java.util.function.IntConsumer onLaunch) {
             this.onLaunch = onLaunch;
             button.setHorizontalAlignment(SwingConstants.LEFT);
             button.setMargin(new Insets(1, 6, 1, 6));
@@ -1352,13 +1187,9 @@ public final class SurroundRandomDialog {
             return button;
         }
 
-        @Override
-        public Object getCellEditorValue() {
-            return button.getText();
-        }
+        @Override public Object getCellEditorValue() { return button.getText(); }
     }
 
-    /** Cell editor wrapper selecting between multiple cell editors per row (e.g. look button vs mode dropdown). */
     private static final class AbstractCellEditorWrapper extends AbstractCellEditor implements TableCellEditor {
         private final RowEditorPicker picker;
         private TableCellEditor active;
@@ -1373,23 +1204,14 @@ public final class SurroundRandomDialog {
             return active.getTableCellEditorComponent(table, value, isSelected, row, column);
         }
 
-        @Override
-        public Object getCellEditorValue() {
-            return active != null ? active.getCellEditorValue() : null;
-        }
-
-        @Override
-        public boolean stopCellEditing() {
-            return (active == null || active.stopCellEditing()) && super.stopCellEditing();
-        }
+        @Override public Object getCellEditorValue() { return active != null ? active.getCellEditorValue() : null; }
+        @Override public boolean stopCellEditing() { return (active == null || active.stopCellEditing()) && super.stopCellEditing(); }
     }
 
-    /** Dynamic supplier for cell spinner limits: {initial value, min, max, step}. */
     private interface SpinnerRange {
         double[] of(int row, Object value);
     }
 
-    /** TableCellEditor embedding a bounded JSpinner for editing numeric table cells. */
     private static final class NumberEditor extends AbstractCellEditor implements TableCellEditor {
         private final JSpinner spinner = new JSpinner(new SpinnerNumberModel(0.0, -10000.0, 10000.0, 1.0));
         private final SpinnerRange range;
@@ -1415,7 +1237,6 @@ public final class SurroundRandomDialog {
         }
     }
 
-    /** Centered cell renderer for swatch icons and thumbnail images. */
     private static final class IconRenderer extends DefaultTableCellRenderer {
         private static final long serialVersionUID = 1L;
 
@@ -1428,5 +1249,4 @@ public final class SurroundRandomDialog {
             return label;
         }
     }
-
 }

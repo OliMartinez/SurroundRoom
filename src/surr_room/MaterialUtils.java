@@ -15,6 +15,7 @@ import com.eteks.sweethome3d.model.HomeLight;
 import com.eteks.sweethome3d.model.HomeMaterial;
 import com.eteks.sweethome3d.model.HomePieceOfFurniture;
 import com.eteks.sweethome3d.model.HomeTexture;
+import com.eteks.sweethome3d.model.TextureImage;
 import com.eteks.sweethome3d.tools.URLContent;
 import java.awt.Color;
 import java.awt.Component;
@@ -22,6 +23,7 @@ import java.awt.Graphics;
 import java.awt.Image;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -33,6 +35,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import javax.imageio.ImageIO;
 import javax.media.j3d.Appearance;
 import javax.media.j3d.BranchGroup;
@@ -47,57 +50,31 @@ import javax.swing.ImageIcon;
 import javax.vecmath.Color3f;
 
 /**
- * Materials of the models and properties of the placed pieces: reads (and caches) the named materials of
- * a model, applies colors, textures and shininess to the whole piece or to chosen materials, applies the
- * random and gradual properties, keeps the back of a piece on its side when its depth changes, and draws
- * the swatches and texture icons of the dialogs.
+ * Extracts and caches named model materials, applies colors/textures/shininess and random/gradual
+ * properties to pieces or targeted materials, anchors depth changes to walls, and builds UI swatch icons.
  */
 public final class MaterialUtils {
 
-    /** Sentinel string key denoting that property changes target the entire piece rather than a sub-material. */
     static final String WHOLE_PIECE = "[piece]";
 
-    /** Private constructor preventing instantiation of utility class. */
     private MaterialUtils() {
     }
 
-    /**
-     * Resolves a unique cache key for a furniture piece's underlying 3D model.
-     *
-     * @return URL string, Content object, or name fallback key
-     */
     static Object modelKey(HomePieceOfFurniture piece) {
         Content model = piece.getModel();
         if (model instanceof URLContent) {
             return ((URLContent) model).getURL().toString();
-        } else if (model != null) {
-            return model;
-        } else {
-            return "NAME:" + piece.getName();
         }
+        return model != null ? model : ("NAME:" + piece.getName());
     }
 
-    /** Immutable snapshot descriptor representing a material on a specific 3D furniture piece. */
     public static final class PieceMaterial {
-        /** Material name as identified in the 3D model. */
-        public final String name;
-
-        /** Material key identifier. */
-        public final String key;
-
-        /** Base 24-bit RGB diffuse color, or null if uncolored. */
+        public final String name, key;
         public final Integer color;
-
-        /** Base texture applied to this material, or null. */
         public final HomeTexture texture;
-
-        /** Base specular glossiness coefficient [0.0, 1.0], or null. */
         public final Float shininess;
-
-        /** Associated furniture piece instance. */
         private final HomePieceOfFurniture piece;
 
-        /** Constructs a PieceMaterial record. */
         public PieceMaterial(String name, String key, Integer color, HomeTexture texture, Float shininess,
                              HomePieceOfFurniture piece) {
             this.name = name;
@@ -108,28 +85,17 @@ public final class MaterialUtils {
             this.piece = piece;
         }
 
-        /**
-         * Generates an interactive 3D thumbnail preview with this material highlighted in orange.
-         *
-         * @return rendered preview image, or null
-         */
         public Image partPreview(int size) {
             return piece != null ? MaterialPreview.highlighted(piece, name, size) : null;
         }
     }
 
-    /**
-     * Gathers all materials defined across a piece of furniture (including child pieces if a group).
-     *
-     * @param property  target property ("color", "texture", "look", or "shininess")
-     */
     public static List<PieceMaterial> pieceMaterialsOf(HomePieceOfFurniture piece, String property, boolean forOrigin) {
         Map<String, PieceMaterial> map = new LinkedHashMap<>();
         collectPieceMaterials(piece, property, forOrigin, map);
         return new ArrayList<>(map.values());
     }
 
-    /** Internal recursive helper collecting materials across furniture groups and composite models. */
     private static void collectPieceMaterials(HomePieceOfFurniture piece, String property, boolean forOrigin,
                                               Map<String, PieceMaterial> out) {
         if (piece == null) {
@@ -141,9 +107,7 @@ public final class MaterialUtils {
             }
             return;
         }
-
         Map<String, HomeMaterial> explicit = explicitMaterialsMap(piece);
-
         Map<String, PieceMaterial> defaults = loadModelMaterials(piece);
         Set<String> allNames = new LinkedHashSet<>(defaults.keySet());
         allNames.addAll(explicit.keySet());
@@ -155,9 +119,7 @@ public final class MaterialUtils {
         for (String name : allNames) {
             PieceMaterial def = defaults.get(name);
             HomeMaterial exp = explicit.get(name);
-
-            String key = exp != null && exp.getKey() != null ? exp.getKey()
-                    : (def != null ? def.key : name);
+            String key = exp != null && exp.getKey() != null ? exp.getKey() : (def != null ? def.key : name);
             Integer color = exp != null && exp.getColor() != null ? exp.getColor()
                     : (pieceColor != null ? pieceColor : (def != null ? def.color : null));
             HomeTexture tex = exp != null && exp.getTexture() != null ? exp.getTexture()
@@ -168,19 +130,8 @@ public final class MaterialUtils {
             Float shine = exp != null && exp.getShininess() != null ? exp.getShininess()
                     : (pieceShine != null ? pieceShine : (def != null ? def.shininess : null));
 
-            if (forOrigin) {
-                if ("color".equals(property) && color == null) {
-                    continue;
-                }
-                if ("texture".equals(property) && tex == null) {
-                    continue;
-                }
-                if ("look".equals(property) && color == null && tex == null) {
-                    continue;
-                }
-                if ("shininess".equals(property) && shine == null) {
-                    continue;
-                }
+            if (forOrigin && pickProp(property, color, tex, shine) == null) {
+                continue;
             }
             if (!out.containsKey(name)) {
                 out.put(name, new PieceMaterial(name, key, color, tex, shine, piece));
@@ -188,7 +139,6 @@ public final class MaterialUtils {
         }
     }
 
-    /** Thread-safe LRU cache storing extracted materials maps for up to 64 distinct 3D model definitions. */
     private static final Map<Object, Map<String, PieceMaterial>> MODEL_MATERIALS = new LinkedHashMap<Object, Map<String, PieceMaterial>>(16, 0.75f, true) {
         private static final long serialVersionUID = 1L;
 
@@ -198,7 +148,6 @@ public final class MaterialUtils {
         }
     };
 
-    /** Loads default materials for a piece's model, using the LRU cache when available. */
     private static synchronized Map<String, PieceMaterial> loadModelMaterials(HomePieceOfFurniture piece) {
         Content model = piece.getModel();
         if (model == null) {
@@ -209,23 +158,17 @@ public final class MaterialUtils {
         if (cached == null) {
             cached = readModelMaterials(model);
             if (cached == null) {
-                return new LinkedHashMap<>(); // Not kept in cache if read failed, allowing retry
+                return new LinkedHashMap<>(); // Omit failed loads from cache so later attempts can retry
             }
             MODEL_MATERIALS.put(key, cached);
         }
         return cached;
     }
 
-    /**
-     * Reads default materials directly from a 3D model Content using Sweet Home 3D's ModelManager.
-     *
-     * @return map of materials or null if load failed
-     */
     private static Map<String, PieceMaterial> readModelMaterials(Content model) {
         final Map<String, PieceMaterial> result = new LinkedHashMap<>();
         final boolean[] failed = {false};
         try {
-            // Synchronous, and reads from Sweet Home 3D's internal cache if already loaded
             ModelManager.getInstance().loadModel(model, true, new ModelManager.ModelObserver() {
                 @Override
                 public void modelUpdated(BranchGroup modelRoot) {
@@ -246,7 +189,6 @@ public final class MaterialUtils {
         return failed[0] ? null : result;
     }
 
-    /** Queries Sweet Home 3D 6.0+ ModelManager.getMaterials(Node) reflectively if supported. */
     private static void addSweetHomeMaterials(Node root, Map<String, PieceMaterial> out) {
         try {
             Object materials = ModelManager.class.getMethod("getMaterials", Node.class).invoke(ModelManager.getInstance(), root);
@@ -260,11 +202,9 @@ public final class MaterialUtils {
                 }
             }
         } catch (Throwable ignored) {
-            // Older Sweet Home 3D version: fallback to manual scene graph traversal
         }
     }
 
-    /** Traverses a scene graph node extracting material names, diffuse colors, textures, and shininess. */
     private static void extractFromNode(Node node, Map<String, PieceMaterial> out) {
         if (node instanceof Group) {
             Group g = (Group) node;
@@ -272,7 +212,7 @@ public final class MaterialUtils {
                 extractFromNode(g.getChild(i), out);
             }
         } else if (node instanceof Link) {
-            // Shapes shared across multiple branches (common in DAE and 3DS files)
+            // Shared shapes across branches (common in DAE and 3DS models)
             extractFromNode(((Link) node).getSharedGroup(), out);
         } else if (node instanceof Shape3D) {
             Appearance app = ((Shape3D) node).getAppearance();
@@ -305,12 +245,10 @@ public final class MaterialUtils {
                 color = (r << 16) | (g << 8) | b;
                 shininess = Math.min(1f, Math.max(0f, mat.getShininess() / 128f));
             }
-            HomeTexture homeTex = extractDefaultTexture(app, name);
-            out.put(name, new PieceMaterial(name, name, color, homeTex, shininess, null));
+            out.put(name, new PieceMaterial(name, name, color, extractDefaultTexture(app, name), shininess, null));
         }
     }
 
-    /** Extracts a default {@link HomeTexture} from a Java3D Appearance texture object. */
     private static HomeTexture extractDefaultTexture(Appearance app, String name) {
         try {
             Texture tex = app.getTexture();
@@ -321,11 +259,11 @@ public final class MaterialUtils {
             Content content = null;
             if (userData instanceof Content) {
                 content = (Content) userData;
-            } else if (userData instanceof java.net.URL) {
-                content = new URLContent((java.net.URL) userData);
+            } else if (userData instanceof URL) {
+                content = new URLContent((URL) userData);
             } else if (userData instanceof String) {
                 try {
-                    content = new URLContent(new java.net.URL((String) userData));
+                    content = new URLContent(new URL((String) userData));
                 } catch (Exception ignored) {
                 }
             }
@@ -333,12 +271,10 @@ public final class MaterialUtils {
                 return null;
             }
             final Content imgContent = content;
-            final float w = Math.max(1f, tex.getWidth());
-            final float h = Math.max(1f, tex.getHeight());
-            final String texName = name;
-            return new HomeTexture(new com.eteks.sweethome3d.model.TextureImage() {
+            final float w = Math.max(1f, tex.getWidth()), h = Math.max(1f, tex.getHeight());
+            return new HomeTexture(new TextureImage() {
                 private static final long serialVersionUID = 1L;
-                @Override public String getName() { return texName; }
+                @Override public String getName() { return name; }
                 @Override public String getCreator() { return null; }
                 @Override public Content getImage() { return imgContent; }
                 @Override public float getWidth() { return w; }
@@ -349,19 +285,32 @@ public final class MaterialUtils {
         }
     }
 
-    /**
-     * Resolves the current value of a property on a piece of furniture, checking both
-     * whole-piece settings and sub-materials.
-     *
-     * @param materialKeys collection of targeted material keys if not whole
-     * @return resolved value object or null
-     */
+    private static boolean isLookProp(String property) {
+        return "color".equals(property) || "texture".equals(property) || "look".equals(property);
+    }
+
+    private static Object pickProp(String property, Integer color, HomeTexture tex, Float shine) {
+        if ("color".equals(property)) {
+            return color;
+        }
+        if ("texture".equals(property)) {
+            return tex;
+        }
+        if ("look".equals(property)) {
+            return tex != null ? tex : color;
+        }
+        if ("shininess".equals(property)) {
+            return shine;
+        }
+        return null;
+    }
+
     public static Object valueOf(HomePieceOfFurniture piece, String property, boolean whole, Collection<String> materialKeys) {
         if (piece == null) {
             return null;
         }
         if (whole) {
-            Object v = directPieceValue(piece, property);
+            Object v = pickProp(property, piece.getColor(), piece.getTexture(), piece.getShininess());
             if (v != null) {
                 return v;
             }
@@ -389,73 +338,22 @@ public final class MaterialUtils {
             byName.put(pm.name, pm);
         }
         for (String key : materialKeys) {
-            PieceMaterial pm = byName.get(key);
-            if (pm != null) {
-                Object mv = materialField(pm, property);
-                if (mv != null) {
-                    return mv;
-                }
+            Object mv = materialField(byName.get(key), property);
+            if (mv != null) {
+                return mv;
             }
         }
         return null;
     }
 
-    /** Resolves the direct whole-piece property value (color, texture, look, or shininess). */
-    private static Object directPieceValue(HomePieceOfFurniture piece, String property) {
-        if ("color".equals(property)) {
-            return piece.getColor();
-        } else if ("texture".equals(property)) {
-            return piece.getTexture();
-        } else if ("look".equals(property)) {
-            if (piece.getTexture() != null) {
-                return piece.getTexture();
-            }
-            return piece.getColor();
-        } else if ("shininess".equals(property)) {
-            return piece.getShininess();
-        }
-        return null;
-    }
-
-    /** Extracts the specific field corresponding to {@code property} from a {@link PieceMaterial}. */
     public static Object materialField(PieceMaterial m, String property) {
-        if (m == null) {
-            return null;
-        }
-        if ("color".equals(property)) {
-            return m.color;
-        } else if ("texture".equals(property)) {
-            return m.texture;
-        } else if ("look".equals(property)) {
-            return m.texture != null ? m.texture : m.color;
-        } else if ("shininess".equals(property)) {
-            return m.shininess;
-        }
-        return null;
+        return m == null ? null : pickProp(property, m.color, m.texture, m.shininess);
     }
 
-    /** Extracts the specific field corresponding to {@code property} from a {@link HomeMaterial}. */
     public static Object materialField(HomeMaterial m, String property) {
-        if (m == null) {
-            return null;
-        }
-        if ("color".equals(property)) {
-            return m.getColor();
-        } else if ("texture".equals(property)) {
-            return m.getTexture();
-        } else if ("look".equals(property)) {
-            return m.getTexture() != null ? m.getTexture() : m.getColor();
-        } else if ("shininess".equals(property)) {
-            return m.getShininess();
-        }
-        return null;
+        return m == null ? null : pickProp(property, m.getColor(), m.getTexture(), m.getShininess());
     }
 
-    /**
-     * Assigns a property value directly to the whole piece, clearing conflicting material overrides.
-     *
-     * @param property property key ("color", "texture", "look", or "shininess")
-     */
     public static void setPieceValue(HomePieceOfFurniture piece, String property, Object value) {
         if (value == null) {
             return;
@@ -465,51 +363,41 @@ public final class MaterialUtils {
                 setPieceValue(child, property, value);
             }
         }
-        if ("color".equals(property) && value instanceof Integer) {
-            piece.setTexture(null);
-            piece.setColor((Integer) value);
-            clearMaterialOverride(piece, "color");
-        } else if ("texture".equals(property) && value instanceof HomeTexture) {
-            piece.setColor(null);
-            piece.setTexture((HomeTexture) value);
-            clearMaterialOverride(piece, "texture");
-        } else if ("look".equals(property)) {
-            if (value instanceof HomeTexture) {
+        if (isLookProp(property)) {
+            if (value instanceof HomeTexture && !"color".equals(property)) {
                 piece.setColor(null);
                 piece.setTexture((HomeTexture) value);
-                clearMaterialOverride(piece, "look");
-            } else if (value instanceof Integer) {
+                clearMaterialOverride(piece, property);
+            } else if (value instanceof Integer && !"texture".equals(property)) {
                 piece.setTexture(null);
                 piece.setColor((Integer) value);
-                clearMaterialOverride(piece, "look");
+                clearMaterialOverride(piece, property);
             }
         } else if ("shininess".equals(property) && value instanceof Float) {
             piece.setShininess((Float) value);
-            clearMaterialOverride(piece, "shininess");
+            clearMaterialOverride(piece, property);
         }
     }
 
-    /** Clears conflicting per-material overrides for the specified property so whole-piece styling takes effect. */
     private static void clearMaterialOverride(HomePieceOfFurniture piece, String property) {
         HomeMaterial[] mats = piece.getModelMaterials();
         if (mats == null || mats.length == 0) {
             return;
         }
+        boolean clearLook = isLookProp(property), clearShine = "shininess".equals(property);
         HomeMaterial[] updated = new HomeMaterial[mats.length];
         for (int i = 0; i < mats.length; i++) {
             HomeMaterial m = mats[i];
-            if (m == null) {
-                continue;
+            if (m != null) {
+                updated[i] = new HomeMaterial(m.getName(), m.getKey(),
+                        clearLook ? null : m.getColor(),
+                        clearLook ? null : m.getTexture(),
+                        clearShine ? null : m.getShininess());
             }
-            Integer color = ("color".equals(property) || "texture".equals(property) || "look".equals(property)) ? null : m.getColor();
-            HomeTexture tex = ("color".equals(property) || "texture".equals(property) || "look".equals(property)) ? null : m.getTexture();
-            Float shine = "shininess".equals(property) ? null : m.getShininess();
-            updated[i] = new HomeMaterial(m.getName(), m.getKey(), color, tex, shine);
         }
         piece.setModelMaterials(updated);
     }
 
-    /** Applies property values selectively to specific materials identified by {@code targetMaterialKeys}. */
     public static void applyToMaterials(HomePieceOfFurniture piece, String property,
                                         Collection<String> targetMaterialKeys,
                                         Function<HomeMaterial, Object> valueForMaterial) {
@@ -522,15 +410,12 @@ public final class MaterialUtils {
             }
             return;
         }
-
         List<PieceMaterial> all = pieceMaterialsOf(piece, property, false);
         if (all.isEmpty()) {
             return;
         }
         Map<String, HomeMaterial> explicit = explicitMaterialsMap(piece);
-
-        boolean setsLook = "color".equals(property) || "texture".equals(property) || "look".equals(property);
-        boolean setsShine = "shininess".equals(property);
+        boolean setsLook = isLookProp(property), setsShine = "shininess".equals(property);
         Integer wholeColor = piece.getColor();
         HomeTexture wholeTex = piece.getTexture();
         Float wholeShine = piece.getShininess();
@@ -562,21 +447,13 @@ public final class MaterialUtils {
                     Integer color = exp != null ? exp.getColor() : (setsLook ? baseColor : null);
                     HomeTexture tex = exp != null ? exp.getTexture() : (setsLook ? baseTex : null);
                     Float shine = exp != null ? exp.getShininess() : (setsShine ? baseShine : null);
-                    if ("color".equals(property) && val instanceof Integer) {
-                        color = (Integer) val;
-                        tex = null;
-                    } else if ("texture".equals(property) && val instanceof HomeTexture) {
+                    if (setsLook && val instanceof HomeTexture && !"color".equals(property)) {
                         tex = (HomeTexture) val;
                         color = null;
-                    } else if ("look".equals(property)) {
-                        if (val instanceof HomeTexture) {
-                            tex = (HomeTexture) val;
-                            color = null;
-                        } else if (val instanceof Integer) {
-                            color = (Integer) val;
-                            tex = null;
-                        }
-                    } else if ("shininess".equals(property) && val instanceof Float) {
+                    } else if (setsLook && val instanceof Integer && !"texture".equals(property)) {
+                        color = (Integer) val;
+                        tex = null;
+                    } else if (setsShine && val instanceof Float) {
                         shine = (Float) val;
                     }
                     updated.add(new HomeMaterial(pm.name, pm.key, color, tex, shine));
@@ -589,27 +466,20 @@ public final class MaterialUtils {
                 Float s = exp.getShininess() != null ? exp.getShininess() : (setsShine ? wholeShine : null);
                 updated.add(new HomeMaterial(exp.getName(), exp.getKey(), c, t, s));
             } else if ((setsLook && (wholeColor != null || wholeTex != null)) || (setsShine && wholeShine != null)) {
-                updated.add(new HomeMaterial(pm.name, pm.key,
-                        setsLook ? wholeColor : null,
-                        setsLook ? wholeTex : null,
-                        setsShine ? wholeShine : null));
+                updated.add(new HomeMaterial(pm.name, pm.key, setsLook ? wholeColor : null,
+                        setsLook ? wholeTex : null, setsShine ? wholeShine : null));
             }
         }
         piece.setModelMaterials(updated.toArray(new HomeMaterial[0]));
     }
 
-    /**
-     * Applies all active stochastic random properties to a placed furniture piece.
-     * Respects subset sampling probability and model mirroring.
-     */
     public static void applyRandomProperties(HomePieceOfFurniture piece, SurroundRandomSettings rnd, Random rng) {
         if (piece == null || rnd == null || !rnd.hasAny()) {
             return;
         }
-        if (rnd.randomObjectSubset && rnd.objectProbability < 100.0) {
-            if (rnd.objectProbability <= 0.0 || rng.nextDouble() * 100.0 >= rnd.objectProbability) {
-                return;
-            }
+        if (rnd.randomObjectSubset && rnd.objectProbability < 100.0
+                && (rnd.objectProbability <= 0.0 || rng.nextDouble() * 100.0 >= rnd.objectProbability)) {
+            return;
         }
         applyProperties(piece, rnd, rnd::isActive, (property, current) -> rnd.draw(property, current, rng),
                 () -> applyRandomLook(piece, rnd, rng));
@@ -618,12 +488,6 @@ public final class MaterialUtils {
         }
     }
 
-    /**
-     * Applies gradual mathematical transitions to properties on a placed piece at parameter {@code t} in [0, 1].
-     *
-     * @param t         normalized position [0.0, 1.0]
-     * @param itemIndex 0-based piece index along the progression
-     */
     public static void applyGradualProperties(HomePieceOfFurniture piece, SurroundRandomSettings grad, double t, int itemIndex) {
         if (piece == null || grad == null || !grad.hasAnyGradual()) {
             return;
@@ -633,14 +497,12 @@ public final class MaterialUtils {
                 () -> applyGradualLook(piece, grad, t));
     }
 
-    /** Functional interface computing the next property value. */
     private interface NextValue {
         double of(String property, double current);
     }
 
-    /** Internal dispatcher applying numeric properties and looks in a deterministic order. */
     private static void applyProperties(HomePieceOfFurniture piece, SurroundRandomSettings settings,
-            java.util.function.Predicate<String> on, NextValue next, Runnable look) {
+            Predicate<String> on, NextValue next, Runnable look) {
         if (on.test("shininess")) {
             if (settings.isWholeTarget("shininess")) {
                 Object current = valueOf(piece, "shininess", true, Collections.<String>emptySet());
@@ -666,7 +528,6 @@ public final class MaterialUtils {
             double oldDepth = piece.getDepth();
             applyAnchoredDepthChange(piece, oldDepth, clamp(next.of("depth", oldDepth), 0.5, 10000.0));
         }
-        // Angles are unbounded in degrees; Sweet Home 3D normalizes them to [0, 2*PI)
         if (on.test("pitch") && piece.isHorizontallyRotatable()) {
             piece.setPitch((float) Math.toRadians(next.of("pitch", Math.toDegrees(piece.getPitch()))));
         }
@@ -678,7 +539,6 @@ public final class MaterialUtils {
         }
     }
 
-    /** Recursively updates emitter light power if the piece is a {@link HomeLight} or group. */
     private static void applyLightPower(HomePieceOfFurniture piece, NextValue next) {
         if (piece instanceof HomeLight) {
             HomeLight light = (HomeLight) piece;
@@ -690,30 +550,22 @@ public final class MaterialUtils {
         }
     }
 
-    /** Converts a 0-100 percentage value into a [0.0, 1.0] float fraction. */
     private static float percent(double value) {
         return (float) (clamp(value, 0.0, 100.0) / 100.0);
     }
 
-    /** Numerical clamping helper. */
     private static double clamp(double value, double min, double max) {
         return Math.max(min, Math.min(max, value));
     }
 
-    /**
-     * Registry mapping placed furniture pieces to their local outward normal vectors (nx, ny)
-     * pointing away from the wall/floor edge.
-     */
     private static final Map<HomePieceOfFurniture, double[]> PIECE_OUTWARD_NORMALS = new IdentityHashMap<>();
 
-    /** Registers the outward placement normal vector (nx, ny) for a furniture piece. */
     public static void registerOutwardNormal(HomePieceOfFurniture piece, double nx, double ny) {
         if (piece != null) {
             PIECE_OUTWARD_NORMALS.put(piece, new double[]{nx, ny});
         }
     }
 
-    /** Copies registered normal vector from source piece to target piece (e.g. for stacked copies). */
     public static void copyOutwardNormal(HomePieceOfFurniture source, HomePieceOfFurniture target) {
         if (source != null && target != null) {
             double[] n = PIECE_OUTWARD_NORMALS.get(source);
@@ -723,55 +575,41 @@ public final class MaterialUtils {
         }
     }
 
-    /** Clears the outward normal registry map. */
     public static void clearOutwardNormals() {
         PIECE_OUTWARD_NORMALS.clear();
     }
 
-    /**
-     * Resizes the depth of a placed piece while shifting its center coordinate (x, y) along the
-     * wall's outward normal (nx, ny). This guarantees that the back face of the furniture piece
-     * remains firmly anchored against the wall surface without penetrating into the wall or detaching.
-     *
-     * @param oldDepth prior depth in cm
-     * @param newDepth updated depth in cm
-     */
+    /** Resizes depth while shifting the center along the wall outward normal so the back stays anchored to the side. */
     private static void applyAnchoredDepthChange(HomePieceOfFurniture piece, double oldDepth, double newDepth) {
         if (Math.abs(newDepth - oldDepth) < 1e-4) {
             return;
         }
         double scaleAcross = newDepth / Math.max(0.5, oldDepth);
         double[] wallNormal = PIECE_OUTWARD_NORMALS.get(piece);
-        double nx, ny;
+        double nx, ny, delta;
         if (wallNormal != null) {
             nx = wallNormal[0];
             ny = wallNormal[1];
-            double wallAngle = Math.atan2(nx, -ny);
-            double relAngle = piece.getAngle() - wallAngle;
+            double relAngle = piece.getAngle() - Math.atan2(nx, -ny);
             double c = Math.abs(Math.cos(relAngle)), s = Math.abs(Math.sin(relAngle));
             double oldAcross = piece.getWidth() * s + piece.getDepth() * c;
-            if (s > 0.707) {
-                // Piece was rotated ~90 deg in the plan: its width lies across the wall!
+            if (s > 0.707) { // Rotated ~90 deg in plan: width spans across the wall
                 piece.setWidth((float) Math.max(0.5, piece.getWidth() * scaleAcross));
             } else {
                 piece.setDepth((float) Math.max(0.5, piece.getDepth() * scaleAcross));
             }
-            double newAcross = piece.getWidth() * s + piece.getDepth() * c;
-            double delta = (newAcross - oldAcross) / 2.0;
-            piece.setX((float) (piece.getX() + nx * delta));
-            piece.setY((float) (piece.getY() + ny * delta));
+            delta = (piece.getWidth() * s + piece.getDepth() * c - oldAcross) / 2.0;
         } else {
-            double delta = (newDepth - oldDepth) / 2.0;
+            delta = (newDepth - oldDepth) / 2.0;
             double a = piece.getAngle();
             nx = Math.sin(a);
             ny = -Math.cos(a);
             piece.setDepth((float) newDepth);
-            piece.setX((float) (piece.getX() + nx * delta));
-            piece.setY((float) (piece.getY() + ny * delta));
         }
+        piece.setX((float) (piece.getX() + nx * delta));
+        piece.setY((float) (piece.getY() + ny * delta));
     }
 
-    /** Builds a lookup map of explicitly overridden materials on a furniture piece. */
     private static Map<String, HomeMaterial> explicitMaterialsMap(HomePieceOfFurniture piece) {
         Map<String, HomeMaterial> explicit = new LinkedHashMap<>();
         HomeMaterial[] mats = piece.getModelMaterials();
@@ -785,13 +623,11 @@ public final class MaterialUtils {
         return explicit;
     }
 
-    /** Interpolates a single 8-bit RGB channel between two colors at factor {@code t}. */
     private static int lerpChannel(int c0, int c1, int shift, double t) {
         int a = (c0 >> shift) & 0xFF, b = (c1 >> shift) & 0xFF;
         return Math.max(0, Math.min(255, (int) Math.round(a + (b - a) * t)));
     }
 
-    /** Interpolates RGB colors gradually from startColor to endColor based on normalized position t. */
     private static void applyGradualLook(HomePieceOfFurniture piece, SurroundRandomSettings grad, double t) {
         double effT = grad.gradualPattern == SurroundRandomSettings.PATTERN_PING_PONG
                 ? (t <= 0.5 ? t * 2.0 : 2.0 * (1.0 - t)) : clamp(t, 0.0, 1.0);
@@ -805,7 +641,6 @@ public final class MaterialUtils {
         }
     }
 
-    /** Resolves a sampled look value (HomeTexture or RGB Integer) for a target piece or sub-material. */
     private static Object resolveRandomLook(SurroundRandomSettings.RandomLook look,
             boolean hasTexture, Integer baseColor, Random rng) {
         SurroundRandomSettings.RandomLook.Choice picked = look.drawChoice(rng);
@@ -817,13 +652,9 @@ public final class MaterialUtils {
                 return (look.varyComponents && picked.vary) ? look.varyColor(picked.color, rng) : picked.color;
             }
         }
-        if (look.varyComponents && !hasTexture) {
-            return look.varyColor(baseColor != null ? baseColor : 0x808080, rng);
-        }
-        return null;
+        return (look.varyComponents && !hasTexture) ? look.varyColor(baseColor != null ? baseColor : 0x808080, rng) : null;
     }
 
-    /** Samples and applies a random color or texture from the configured random look model. */
     private static void applyRandomLook(HomePieceOfFurniture piece, SurroundRandomSettings rnd, Random rng) {
         SurroundRandomSettings.RandomLook look = rnd.look;
         if (rnd.isWholeTarget("look")) {
@@ -838,7 +669,6 @@ public final class MaterialUtils {
         }
     }
 
-    /** Finds the first defined material color on a furniture piece. */
     private static Integer firstMaterialColor(HomePieceOfFurniture piece) {
         for (PieceMaterial pm : pieceMaterialsOf(piece, "look", false)) {
             if (pm.color != null) {
@@ -848,7 +678,6 @@ public final class MaterialUtils {
         return null;
     }
 
-    /** Builds default look choices for the Random dialog based on colors and textures currently present. */
     public static List<SurroundRandomSettings.RandomLook.Choice> defaultLookChoices(
             List<HomePieceOfFurniture> pieces, boolean whole, Collection<String> materialKeys) {
         List<SurroundRandomSettings.RandomLook.Choice> out = new ArrayList<>();
@@ -883,14 +712,11 @@ public final class MaterialUtils {
         return out;
     }
 
-    /** Generates a lookup key for a HomeTexture based on catalog ID and name. */
     private static String textureKey(HomeTexture t) {
         return (t.getCatalogId() != null ? t.getCatalogId() : "") + "|" + (t.getName() != null ? t.getName() : "");
     }
 
-    /** Returns true if the list is empty/null or any non-null piece satisfies the predicate. */
-    private static boolean anyPieceMatches(List<HomePieceOfFurniture> pieces,
-            java.util.function.Predicate<HomePieceOfFurniture> test) {
+    private static boolean anyPieceMatches(List<HomePieceOfFurniture> pieces, Predicate<HomePieceOfFurniture> test) {
         if (pieces == null || pieces.isEmpty()) {
             return true;
         }
@@ -902,30 +728,25 @@ public final class MaterialUtils {
         return false;
     }
 
-    /** Checks if any piece in the list supports horizontal rotation (pitch and roll). */
     public static boolean containsHorizontallyRotatable(List<HomePieceOfFurniture> pieces) {
         return anyPieceMatches(pieces, HomePieceOfFurniture::isHorizontallyRotatable);
     }
 
-    /** Checks if any piece in the list is resizable in width, depth, or height. */
     public static boolean containsResizable(List<HomePieceOfFurniture> pieces) {
         return anyPieceMatches(pieces, HomePieceOfFurniture::isResizable);
     }
 
-    /** Checks if the list contains any light fixture (HomeLight). */
     public static boolean containsLight(List<HomePieceOfFurniture> pieces) {
-        if (pieces == null) {
-            return false;
-        }
-        for (HomePieceOfFurniture p : pieces) {
-            if (containsLight(p)) {
-                return true;
+        if (pieces != null) {
+            for (HomePieceOfFurniture p : pieces) {
+                if (containsLight(p)) {
+                    return true;
+                }
             }
         }
         return false;
     }
 
-    /** Checks if a piece or any child in its group is a HomeLight. */
     public static boolean containsLight(HomePieceOfFurniture piece) {
         if (piece instanceof HomeLight) {
             return true;
@@ -940,7 +761,6 @@ public final class MaterialUtils {
         return false;
     }
 
-    /** Unwraps single furniture groups to their top-level constituent children for preview lists. */
     public static List<HomePieceOfFurniture> topPiecesOf(List<HomePieceOfFurniture> pieces) {
         if (pieces == null || pieces.isEmpty()) {
             return Collections.emptyList();
@@ -951,28 +771,23 @@ public final class MaterialUtils {
         return new ArrayList<>(pieces);
     }
 
-    /** Formats a human-readable display string representing a material property value (e.g. hex color or texture name). */
     public static String formatMaterialValue(PieceMaterial m, String property) {
         if ("color".equals(property)) {
             return m.color != null ? String.format("#%06X", m.color & 0xFFFFFF) : "\u2014";
-        } else if ("texture".equals(property)) {
+        }
+        if ("texture".equals(property)) {
             return m.texture != null ? m.texture.getName() : "\u2014";
-        } else if ("look".equals(property)) {
-            if (m.texture != null) {
-                return m.texture.getName();
-            }
-            return m.color != null ? String.format("#%06X", m.color & 0xFFFFFF) : "\u2014";
-        } else if ("shininess".equals(property)) {
+        }
+        if ("look".equals(property)) {
+            return m.texture != null ? m.texture.getName()
+                    : (m.color != null ? String.format("#%06X", m.color & 0xFFFFFF) : "\u2014");
+        }
+        if ("shininess".equals(property)) {
             return m.shininess != null ? Math.round(m.shininess * 100f) + "%" : "\u2014";
         }
         return "";
     }
 
-    /**
-     * Builds an 18x18 pixel swatch Icon representing a material's color, texture, or shininess.
-     *
-     * @return swatch Icon, or null
-     */
     public static Icon swatchIcon(PieceMaterial m, String property) {
         if ("color".equals(property) && m.color != null) {
             return new ColorIcon(new Color(m.color));
@@ -993,11 +808,6 @@ public final class MaterialUtils {
         return null;
     }
 
-    /**
-     * Loads a scaled thumbnail image from texture Content streams.
-     *
-     * @return ImageIcon, or null if load fails
-     */
     public static ImageIcon loadTextureIcon(Content content, int size) {
         if (content == null) {
             return null;
@@ -1012,7 +822,6 @@ public final class MaterialUtils {
         return null;
     }
 
-    /** Simple 18x18 pixel solid color swatch Icon with a 1-pixel gray border. */
     public static final class ColorIcon implements Icon {
         private final Color color;
 
@@ -1020,15 +829,8 @@ public final class MaterialUtils {
             this.color = color;
         }
 
-        @Override
-        public int getIconWidth() {
-            return 18;
-        }
-
-        @Override
-        public int getIconHeight() {
-            return 18;
-        }
+        @Override public int getIconWidth() { return 18; }
+        @Override public int getIconHeight() { return 18; }
 
         @Override
         public void paintIcon(Component c, Graphics g, int x, int y) {

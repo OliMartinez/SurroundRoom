@@ -43,201 +43,85 @@ import java.util.Set;
  */
 public class SurroundGeometryEngine {
 
-    /** Numerical tolerance threshold for geometric equality checks and distance comparisons (in cm). */
     private static final double EPSILON = 1e-4;
-
-    /** Flag allowing asynchronous preview workers to abort an in-progress computation cleanly. */
     private volatile boolean cancelled = false;
 
-    /** Cancels an ongoing geometry calculation from another thread. */
     public void cancel() {
         this.cancelled = true;
     }
 
-    /** Throws a cancellation exception if this engine run has been cancelled. */
     private void checkCancelled() {
         if (cancelled || Thread.currentThread().isInterrupted()) {
             throw new java.util.concurrent.CancellationException();
         }
     }
 
-    /** Precomputed 2D polygons and bounding boxes for existing home furniture to accelerate collision checks. */
+    // Per-face collision caches populated by prepareCollisionCaches
+    private HomePieceOfFurniture[] existingPieces;
     private float[][][] existingPolys;
     private float[][] existingBounds;
-    /** Precomputed 2D polygons and bounding boxes for home walls on the active level. */
     private Wall[] activeWalls;
     private float[][][] wallPolys;
     private float[][] wallBounds;
-    /** Precomputed 2D polygons and bounding boxes for nearby floors on the active level. */
     private float[][][] nearbyFloorPolys;
     private float[][] nearbyFloorBounds;
 
-    /** Active Sweet Home 3D model containing the architectural elements and furniture scene graph. */
     private final Home home;
-
-    /** Main application controller for executing undoable user actions (such as paste and selection changes). */
     private final HomeController homeController;
-
-    /** Target rooms, floors, or perimeter boundary polygons being surrounded. */
     private final List<Room> selectedRooms;
-
-    /** Template furniture items selected by the user to replicate along perimeters. */
     private final List<HomePieceOfFurniture> selectedFurniture;
-
-    /** Pre-existing furniture pieces in the home, excluding selected templates and their descendants. */
     private final List<HomePieceOfFurniture> existingHomeFurniture = new ArrayList<>();
-
-    /** Accumulator of all newly generated furniture instances across all levels to be added to the home. */
     private final List<HomePieceOfFurniture> newlyPlacedFurniture = new ArrayList<>();
-
-    /** Furniture pieces placed on the base (first) level before vertical stacking or upward replication. */
     private final List<HomePieceOfFurniture> firstLevelPlacedFurniture = new ArrayList<>();
 
-    // ---- Tracking and Grouping Structures (Item 1) ----
-
-    /** Map of side grouping keys to the list of furniture pieces placed along that specific side. */
     private final Map<String, List<HomePieceOfFurniture>> sidePlacedGroups = new LinkedHashMap<>();
-
-    /** Lookup map mapping each base piece instance to its corresponding side grouping key. */
     private final Map<HomePieceOfFurniture, String> basePieceToSideKey = new LinkedHashMap<>();
-
-    /** Level of the face each placed piece belongs to (where it must be pasted in the scene graph). */
     private final Map<HomePieceOfFurniture, Level> placedLevels = new HashMap<>();
-
     /** Clean un-randomized copy of each first-level piece so stacked levels can draw independently. */
     private final Map<HomePieceOfFurniture, HomePieceOfFurniture> cleanBasePieces = new IdentityHashMap<>();
-
-    /** Set tracking which furniture pieces were instantiated specifically as corner pieces. */
     private final Set<HomePieceOfFurniture> cornerBasePieces = Collections.newSetFromMap(new IdentityHashMap<HomePieceOfFurniture, Boolean>());
-
-    /** Mapping from a placed piece to the Room / floor boundary it was generated for. */
     private final Map<HomePieceOfFurniture, Room> pieceRooms = new IdentityHashMap<>();
-
-    /** Mapping from a placed piece to the zero-based logical side index within its room. */
     private final Map<HomePieceOfFurniture, Integer> pieceSideIndices = new IdentityHashMap<>();
-
-    /** Mapping from a placed piece to the vertex index where it originated (for Type 7 vertex placements). */
     private final Map<HomePieceOfFurniture, Integer> pieceVertexIndices = new IdentityHashMap<>();
-
-    /** Mapping from a placed piece to the total number of sides in its owning room. */
     private final Map<HomePieceOfFurniture, Integer> pieceRoomSideCounts = new IdentityHashMap<>();
 
-    /** Current side index being processed by the traversal algorithm (-1 when inactive). */
     private int currentSideIndex = -1;
-
-    /** Current vertex index being processed (-1 when inactive). */
     private int currentVertexIndex = -1;
-
-    /** Total number of logical sides of the room currently being processed. */
     private int currentRoomSideCount = 0;
-
-    /** Pseudorandom number generator for stochastic variation passes. */
     private Random randomPropsRng = new Random();
-
-    /** Current side grouping identifier string used during placement iteration. */
     private String currentSideGroupKey = null;
-
-    /** Primary representative template item derived from the user's furniture selection. */
     private HomePieceOfFurniture primaryTemplate;
-
-    /** Room boundary polygon currently being traversed and populated with furniture. */
     private Room currentProcessingRoom;
-
-    /** Active configuration settings snapshot governing the placement pipeline. */
     private SurroundConfig activeConfig;
-
-    /** Doors, windows, and obstacles that interrupt the perimeter sides of the active face (Item 6). */
     private List<HomePieceOfFurniture> currentObstacles = Collections.emptyList();
-
-    /** Maximum bounding width (front length) among all selected template furniture pieces (in cm). */
     private double maxSurroundingWidth;
-
-    /** Maximum bounding depth (across thickness) among all selected template furniture pieces (in cm). */
     private double maxSurroundingDepth;
 
-    // ---- Curve Layout Coordinate Normalization Parameters ----
-
     /**
-     * Coordinate origin along a curve layout: from layoutFrom, the straight extension
-     * before the curve (layoutPre long, 1:1), the curve from layoutCurveStart to layoutCurveEnd laid
-     * out on layoutCurveLayout (its narrowest line, stretched back by layoutStretch), then the
-     * straight extension after it (1:1).
+     * Curve layout normalization: from layoutFrom, straight pre-extension (layoutPre, 1:1), curve from
+     * layoutCurveStart to layoutCurveEnd laid out on its narrowest line (layoutCurveLayout, stretched back
+     * by layoutStretch), then straight post-extension (1:1).
      */
-    private double layoutFrom;
-
-    /** Stretching factor applied to curve arc lengths to normalize internal vs external radii. */
-    private double layoutStretch = 1;
-
-    /** Linear extension length preceding the start of a curved corner segment. */
-    private double layoutPre;
-
-    /** Arc-length coordinate marking the start of the curved portion of a side. */
-    private double layoutCurveStart;
-
-    /** Arc-length coordinate marking the end of the curved portion of a side. */
-    private double layoutCurveEnd;
-
-    /** Effective layout length of the curved segment at its narrowest boundary line. */
-    private double layoutCurveLayout;
-
-    /** Minimum arc-length position placed along the current side during placement. */
+    private double layoutFrom, layoutStretch = 1, layoutPre, layoutCurveStart, layoutCurveEnd, layoutCurveLayout;
     private double currentSidePlacedMin = Double.MAX_VALUE;
-
-    /** Maximum arc-length position placed along the current side during placement. */
     private double currentSidePlacedMax = -Double.MAX_VALUE;
-
-    /** Lateral tolerance available at the start boundary of the current stretch (in cm). */
-    private double currentStretchStartTol = 0.0;
-
-    /** Lateral tolerance available at the end boundary of the current stretch (in cm). */
-    private double currentStretchEndTol = 0.0;
-
-    /** Perpendicular distance offset from the perimeter edge for the current side being surrounded. */
+    private double currentStretchStartTol = 0.0, currentStretchEndTol = 0.0;
     private double currentSideOffset = 0;
-
-    /** Array of perpendicular distance offsets indexed by side for multi-sided polygons. */
     private double[] sideOffsets;
-
-    /** Arc length scaling factor for parallel offset curves (length along offset curve / length along base curve). */
+    /** Ratio of base curve length to offset curve length for parallel offset curves. */
     private double curveWidthFactor = 1;
 
-    // ---- Uniform Sizing and Gap Distribution Solving Parameters ----
-
     /**
-     * Flag indicating whether the engine is currently in the measurement pre-pass:
-     * with the same size (types 3 and 4) or the same spaces (types 1 and 2) around the whole outline,
-     * a first pass only measures the stretches to cover (nothing is placed), the common size or
-     * spaces and the count of each stretch are solved for all of them, then a second pass places.
+     * True during the dry-run measurement pre-pass used when uniform size (types 3-4) or uniform gaps
+     * (types 1-2) is enabled: collects stretches without placing, solves a global scale/gap, then places.
      */
     private boolean measuringUniform;
-
-    /** Collected list of perimeter stretches evaluated during the uniform measurement pass. */
     private final List<UniformStretch> uniformStretches = new ArrayList<>();
-
-    /** Current index pointer into uniformStretches during the placement playback pass. */
     private int uniformIndex;
-
-    /** Computed global uniform scale factor for Type 3 (enlarge) layout algorithm. */
-    private double uniformScale3 = 1;
-
-    /** Computed global uniform scale factor for Type 4 (reduce) layout algorithm. */
-    private double uniformScale4 = 1;
-
-    /** Scale factor applied to corner pieces when derived from the selected template furniture. */
-    private double cornerPieceScale = 1;
-
-    /**
-     * Boolean table indicating which side ends ([side][0 = start, 1 = end]) abut a corner piece
-     * that defines its own distinct margin, preventing double-margin accumulation.
-     */
+    private double uniformScale3 = 1, uniformScale4 = 1, cornerPieceScale = 1;
+    /** [side][0=start, 1=end]: true when an abutting corner piece already reserves its own margin. */
     private boolean[][] cornerOwnMargin = new boolean[0][0];
 
-    /**
-     * Constructs a new geometry engine bound to the specified home and target entities.
-     *
-     * @param home              the active Sweet Home 3D project model
-     * @param homeController    the active window controller for committing edits
-     */
     public SurroundGeometryEngine(Home home, HomeController homeController,
             List<Room> selectedRooms, List<HomePieceOfFurniture> selectedFurniture) {
         this.home = home;
@@ -246,47 +130,30 @@ public class SurroundGeometryEngine {
         this.selectedFurniture = selectedFurniture;
     }
 
-    /**
-     * Executes the complete surround placement pipeline:
-     * 1. Generates the base layout on the first level in-memory.
-     * 2. Replicates pieces upwards if vertical stacking is enabled.
-     * 3. Groups and commits the resulting items to the Sweet Home 3D home model.
-     */
     public void execute(SurroundConfig config) {
         computeInMemory(config);
         commitToHome(config);
     }
 
-    /** Computes all levels of placed furniture in memory without touching the Sweet Home 3D model (safe for background thread). */
+    /** Computes all levels in memory without modifying Home (safe for background threads). */
     public void computeInMemory(SurroundConfig config) {
         runFirstLevel(config, new Random().nextLong());
         applyVerticalStacking(config);
     }
 
-    /** Commits the previously computed furniture to the Sweet Home 3D Home model on the EDT. */
     public void commitToHome(SurroundConfig config) {
         commitPlacedFurniture(config);
     }
 
-    /**
-     * Computes the first-level surround placement in-memory without altering the home model,
-     * returning the placed pieces for display in the interactive 2D preview panel of SideEndsPanel.
-     */
+    /** Computes the first level in memory with a fixed seed for deterministic 2D previews. */
     public List<HomePieceOfFurniture> previewFirstLevel(SurroundConfig config) {
         if (selectedFurniture == null || selectedFurniture.isEmpty() || selectedRooms == null || selectedRooms.isEmpty()) {
             return Collections.emptyList();
         }
-        // Use a deterministic seed for preview consistency across UI redraws
         runFirstLevel(config, 12345L);
         return new ArrayList<>(firstLevelPlacedFurniture);
     }
 
-    /**
-     * Executes the first-level perimeter placement in memory using the supplied PRNG seed.
-     * Handles uniform measurement pre-passes, obstacle detection, side traversal, and gradual property assignment.
-     *
-     * @param seed   the random seed for deterministic or stochastic property variation
-     */
     private void runFirstLevel(SurroundConfig config, long seed) {
         this.activeConfig = config;
         config.skippedDueToNoFloorBelow = false;
@@ -295,12 +162,10 @@ public class SurroundGeometryEngine {
         maxSurroundingWidth = dims[0];
         maxSurroundingDepth = dims[1];
 
-        // Collect all furniture pieces belonging to the selected templates (including grouped children)
         Set<HomePieceOfFurniture> templateSet = new HashSet<>();
         for (HomePieceOfFurniture selPiece : selectedFurniture) {
             collectTemplatePieces(selPiece, templateSet);
         }
-        // Populate existingHomeFurniture excluding templates to prevent false collisions
         existingHomeFurniture.clear();
         if (home != null) {
             for (HomePieceOfFurniture existing : home.getFurniture()) {
@@ -317,7 +182,6 @@ public class SurroundGeometryEngine {
         uniformStretches.clear();
         resetUniformReport(config);
 
-        // If uniform sizing or uniform gaps are enabled, execute a pre-measurement pass
         if (usesUniform(config)) {
             prepareUniform(config);
             clearPlacements();
@@ -325,21 +189,14 @@ public class SurroundGeometryEngine {
             this.randomPropsRng = new Random(seed);
         }
         uniformIndex = 0;
-        // Execute the main placement pass
         surroundFirstLevel(config);
-        // Apply gradual property progression (colors, dimensions) across the placed pieces
         applyGradualToFirstLevel(config);
     }
 
-    /** Checks whether the given furniture instance was placed as an orthogonal or catalog corner piece. */
     public boolean isCornerPiece(HomePieceOfFurniture piece) {
         return cornerBasePieces.contains(piece);
     }
 
-    /**
-     * Clears all placement tracking maps, accumulators, and cached surface normal orientations.
-     * Invoked prior to a new layout run or between uniform measurement and placement passes.
-     */
     private void clearPlacements() {
         newlyPlacedFurniture.clear();
         firstLevelPlacedFurniture.clear();
@@ -358,7 +215,6 @@ public class SurroundGeometryEngine {
         MaterialUtils.clearOutwardNormals();
     }
 
-    /** Resets diagnostic counters and statistics in the configuration DTO for uniform sizing and gap reports. */
     private static void resetUniformReport(SurroundConfig config) {
         config.sizeAdjustedStretches = 0;
         config.sizeSpread = 0;
@@ -368,11 +224,13 @@ public class SurroundGeometryEngine {
         config.gapSpread = 0;
     }
 
-    /** Traverses each selected room boundary and places furniture along its perimeter sides. */
     private void surroundFirstLevel(SurroundConfig config) {
         int roomIdx = 0;
         for (Room face : selectedRooms) {
             checkCancelled();
+            if (config.excludedRooms != null && config.excludedRooms.contains(face)) {
+                continue;
+            }
             roomIdx++;
             currentProcessingRoom = face;
             currentObstacles = obstaclesFor(face);
@@ -389,61 +247,20 @@ public class SurroundGeometryEngine {
         }
     }
 
-    // ---- The same size (types 3 and 4) or the same spaces (types 1 and 2) around the whole outline ----
+    // ---- Uniform size (types 3-4) and uniform spaces (types 1-2) ----
 
-    /**
-     * Data transfer model representing a single continuous linear stretch along a perimeter
-     * side during uniform sizing (Types 3 and 4) or uniform spacing (Types 1 and 2) optimization.
-     * Encapsulates the available linear length, candidate furniture template sequences, prefix sum
-     * tables for fast dimensional queries, and solved layout attributes (scale, piece count, joint, start gap).
-     */
+    /** Linear perimeter stretch collected during the uniform pre-pass and solved before placement. */
     private static final class UniformStretch {
-        /** Algorithmic surround mode (1: uniform gaps, 2: uniform end gaps, 3: enlarged uniform size, 4: reduced uniform size). */
         final int type;
-
-        /** Total linear length available to cover along this stretch (in cm). */
         final double length;
-
-        /** True if this stretch represents the entire undivided logical side of the room boundary. */
         final boolean wholeSide;
-
-        /** Candidate template furniture instances arranged in sequence (in user selection or randomized order). */
         final List<HomePieceOfFurniture> sequence;
-
-        /** Prefix sum array of piece widths: prefix[n] represents the cumulative unscaled width of the first n pieces. */
+        /** Cumulative unscaled widths: prefix[n] = total width of the first n pieces. */
         final double[] prefix;
-
-        /** Boolean flags [width, depth, height] indicating which spatial dimensions adapt to the uniform scale factor. */
         boolean[] dims;
-
-        /** Smallest permissible gap margin (cm) between pieces (derived from piece margin settings). */
-        double minGap;
-
-        /** Solved count of furniture pieces allocated to this stretch (0 if no piece can fit within scale constraints). */
+        double minGap, scale = 1, joint, fixedJoint, startGap, startShift;
         int count;
 
-        /** Solved uniform scale factor applied to furniture pieces along this stretch. */
-        double scale = 1;
-
-        /** Solved inter-piece spacing gap (cm) placed between adjacent furniture models. */
-        double joint;
-
-        /** Fixed inter-piece joint distance (cm) for Type 2 layout (2 * pieceMargin) separating adjacent models. */
-        double fixedJoint;
-
-        /** Leading gap offset (cm) placed before the first furniture model to center or align the run. */
-        double startGap;
-
-        /** Positional shift applied to the starting coordinate when obstacle/corner tolerance is utilized. */
-        double startShift;
-
-        /**
-         * Constructs a new UniformStretch container.
-         *
-         * @param type      the surround algorithm type (1 to 4)
-         * @param length    the linear length of the stretch (cm)
-         * @param wholeSide true if this stretch spans the entire side
-         */
         UniformStretch(int type, double length, boolean wholeSide, List<HomePieceOfFurniture> sequence, double[] prefix) {
             this.type = type;
             this.length = length;
@@ -452,37 +269,18 @@ public class SurroundGeometryEngine {
             this.prefix = prefix;
         }
 
-        /**
-         * Checks whether this stretch operates under uniform sizing (Types 3 and 4).
-         *
-         * @return true for Type 3 (enlarge) and Type 4 (reduce); false for spacing types
-         */
         boolean sameSize() {
             return type == 3 || type == 4;
         }
 
-        /**
-         * Calculates the total unscaled width occupied by n pieces including any fixed internal joint margins.
-         *
-         * @return cumulative occupied width (cm)
-         */
         double occupiedWidth(int n) {
             return prefix[n] + (type == 2 && n > 1 ? (n - 1) * fixedJoint : 0.0);
         }
 
-        /**
-         * Returns the number of variable spacing gaps created by n pieces along this stretch.
-         * For Type 2, exactly 2 end gaps exist (start and end); for Type 1, n - 1 inter-piece gaps exist.
-         */
         int gapCount(int n) {
             return type == 2 ? 2 : n - 1;
         }
 
-        /**
-         * Calculates the individual gap width resulting from placing n pieces across this stretch.
-         *
-         * @return the resulting gap dimension (cm), or Double.NaN if no variable gaps exist or pieces exceed length
-         */
         double gap(int n) {
             int gaps = gapCount(n);
             double gap = gaps > 0 ? (length - occupiedWidth(n)) / gaps : Double.NaN;
@@ -490,22 +288,15 @@ public class SurroundGeometryEngine {
         }
     }
 
-    /**
-     * Determines whether the specified surround type engages uniform multi-pass optimization.
-     *
-     * @param type the surround algorithm type (1 to 7)
-     */
     private boolean usesUniform(int type) {
         return ((type == 3 || type == 4) && activeConfig.uniformSize)
                 || ((type == 1 || type == 2) && activeConfig.uniformGaps);
     }
 
-    /** Determines whether the active configuration engages uniform multi-pass optimization. */
     private boolean usesUniform(SurroundConfig config) {
         return usesUniform(config.surroundType);
     }
 
-    /** Checks whether orthogonal corner pieces are enabled in the configuration. */
     private static boolean usesCornerPieces(SurroundConfig config) {
         return config.enableCornerHandling && config.placeOrthogonalCornerPiece;
     }
@@ -516,21 +307,13 @@ public class SurroundGeometryEngine {
         return type == 3 ? new double[]{1, 1 + change} : new double[]{Math.max(0.05, 1 - change), 1};
     }
 
-    /**
-     * Returns the solved global uniform scale factor corresponding to the given surround type.
-     *
-     * @param type the surround type (3 or 4)
-     */
     private double uniformScale(int type) {
         return type == 3 ? uniformScale3 : uniformScale4;
     }
 
     /**
-     * Executes the iterative pre-measurement pass for uniform sizing and spacing optimization.
-     * Because corner geometry and side depths depend on the scaling of the furniture models
-     * (especially when model depth scales with width), the engine performs an iterative feedback
-     * loop: it measures stretches, solves for optimal common scales, updates the effective depth
-     * and corner scale factors, and repeats until convergence or an iteration cap (8) is reached.
+     * Iterative measurement pre-pass: since corner margins and piece depths depend on the solved scale,
+     * repeats measure -> solve -> update depth/corner scale until convergence (up to 8 passes).
      */
     private void prepareUniform(SurroundConfig config) {
         double baseDepth = maxSurroundingDepth;
@@ -544,20 +327,16 @@ public class SurroundGeometryEngine {
         cornerPieceScale = 1;
         try {
             for (int iteration = 0; ; iteration++) {
-                // Adjust maxSurroundingDepth based on current depth factor estimate
                 maxSurroundingDepth = baseDepth * Math.max(1, depthFactor);
                 uniformStretches.clear();
                 measuringUniform = true;
                 try {
-                    // Execute dry-run layout pass to populate uniformStretches
                     surroundFirstLevel(config);
                 } finally {
                     measuringUniform = false;
                 }
-                // Solve the optimal global scale/gaps across all collected stretches
                 solveUniform(config);
 
-                // Determine the largest scale factor needed across stretches modifying depth
                 double needed = 1;
                 for (UniformStretch stretch : uniformStretches) {
                     if (stretch.sameSize() && stretch.dims[1]) {
@@ -567,45 +346,32 @@ public class SurroundGeometryEngine {
                 double cornerScale = scaledCornerPiece ? uniformScale(config.surroundType) : 1;
                 boolean depthCovered = needed <= Math.max(1, depthFactor) + 1e-9;
                 boolean cornerMatches = Math.abs(cornerPieceScale - cornerScale) < 1e-4;
-
-                // Stop if depth and corner scales have stabilized or max iterations reached
                 if ((depthCovered && cornerMatches) || iteration >= 8) {
                     break;
                 }
                 if (!depthCovered) {
-                    // Update depth factor with a safety margin for the next convergence step
                     depthFactor = iteration < 6 ? needed * (1 + tolerance) : maxScale * (1 + tolerance);
                 }
                 cornerPieceScale = cornerScale;
             }
         } finally {
-            // Lock in the final effective depth for the actual placement pass
             maxSurroundingDepth = baseDepth * Math.max(1, depthFactor);
         }
     }
 
-    /**
-     * Handles uniform stretch recording (during measurement pass) or furniture instantiation (during placement pass).
-     *
-     * @param wholeSide  true if this stretch spans the entire logical side
-     * @param type       surround algorithm type (1 to 4)
-     */
     private void layOutUniform(SidePath side, double from, double wallLength, boolean wholeSide, int type) {
         double maxExtraTol = currentStretchStartTol + currentStretchEndTol;
         double minScale = (type == 3 || type == 4) ? scaleLimits(activeConfig, type)[0] : 1.0;
         double minSingleW = getPieceSurroundingDimensions(primaryTemplate)[0] * minScale;
         double shiftStart = 0.0;
 
-        // If linear length is slightly below minimum single piece width, check if boundary tolerance can bridge it
         if (maxExtraTol > EPSILON && wallLength < minSingleW && wallLength + maxExtraTol >= minSingleW - EPSILON) {
             double needed = minSingleW - wallLength;
             shiftStart = (currentStretchStartTol + currentStretchEndTol) > EPSILON
                     ? needed * (currentStretchStartTol / (currentStretchStartTol + currentStretchEndTol)) : 0.0;
-            double usedEnd = needed - shiftStart;
-            wallLength += shiftStart + usedEnd;
+            wallLength += needed;
         }
 
-        // Pass 1: Measurement pass - record stretch parameters and exit
         if (measuringUniform) {
             List<HomePieceOfFurniture> sequence = uniformSequence(wallLength, type);
             double[] prefix = new double[sequence.size() + 1];
@@ -625,7 +391,6 @@ public class SurroundGeometryEngine {
             return;
         }
 
-        // Pass 2: Placement pass - retrieve precomputed stretch solution
         if (uniformIndex >= uniformStretches.size()) {
             return;
         }
@@ -634,7 +399,6 @@ public class SurroundGeometryEngine {
         wallLength = stretch.length;
         boolean[] dims = dimensionFlags();
 
-        // Handle cases where no pieces fit within the solved constraints
         if (stretch.count == 0) {
             if (activeConfig.shortSidesOneObject && wholeSide) {
                 if (stretch.sameSize()) {
@@ -646,16 +410,13 @@ public class SurroundGeometryEngine {
             return;
         }
 
-        // Place solved pieces sequentially along the stretch
         double cursor = stretch.startGap;
         for (int i = 0; i < stretch.count; i++) {
             HomePieceOfFurniture piece = stretch.sequence.get(i);
             double[] d = getPieceSurroundingDimensions(piece);
             if (stretch.sameSize()) {
-                // Types 3 and 4: Place resized piece according to solved uniform scale
                 cursor += placeResized(side, from + cursor, piece, d, stretch.scale, dims);
             } else {
-                // Types 1 and 2: Place standard unscaled piece with solved joint spacing
                 place(side, from + cursor + d[0] / 2.0, d[1], piece, -1, -1, -1, true, false);
                 cursor += d[0];
             }
@@ -678,13 +439,6 @@ public class SurroundGeometryEngine {
         return new ArrayList<>(Collections.nCopies(count, primaryTemplate));
     }
 
-    /**
-     * Solves uniform optimization models across all collected stretches:
-     * <ul>
-     *   <li>Types 3 and 4: Solves global uniform scaling factors independently for Type 3 (enlarge) and Type 4 (reduce).</li>
-     *   <li>Types 1 and 2: Solves uniform inter-piece or end gap spacing across stretches.</li>
-     * </ul>
-     */
     void solveUniform(SurroundConfig config) {
         resetUniformReport(config);
         for (int type = 1; type <= 4; type++) {
@@ -712,11 +466,9 @@ public class SurroundGeometryEngine {
 
     /**
      * Same size for types 3 and 4: n objects cover a stretch of length L at scale L / P(n) (P: sum of their
-     * widths), and all stretches must share a scale s within uniformMaxSizeDifference. When they can't,
-     * UNIFORM_ADJUST takes the narrowest window of scales and absorbs the rest in joints up to uniformMaxJoint,
-     * and UNIFORM_CENTER or UNIFORM_EMPTY keep s and center or empty the stretches that don't fit.
-     *
-     * @return the common scale s
+     * widths), sharing a common scale s within uniformMaxSizeDifference. When they can't, UNIFORM_ADJUST takes
+     * the narrowest scale window and absorbs residuals in joints up to uniformMaxJoint; UNIFORM_CENTER /
+     * UNIFORM_EMPTY keep s and center or skip unfitting stretches.
      */
     private double solveSameSize(SurroundConfig config, List<UniformStretch> group, int type) {
         double[] limits = scaleLimits(config, type);
@@ -728,7 +480,6 @@ public class SurroundGeometryEngine {
             stretch.scale = 1;
             stretch.joint = 0;
             stretch.startGap = 0;
-            // Only consider stretches that can fit at least one piece within the scale limits
             if (stretch.prefix.length > 1 && stretch.length >= minScale * stretch.prefix[1] - EPSILON) {
                 eligible.add(stretch);
             }
@@ -740,7 +491,6 @@ public class SurroundGeometryEngine {
 
         double maxJoint = Math.max(0, config.uniformMaxJoint);
         for (UniformStretch stretch : eligible) {
-            // Find the piece count whose exact scale is closest to the common scale within limits
             int n = 0;
             double deviation = Double.MAX_VALUE;
             for (int k = 1; k < stretch.prefix.length; k++) {
@@ -754,13 +504,12 @@ public class SurroundGeometryEngine {
                     deviation = d;
                 }
             }
-            // Case 1: Exact fit within tolerance band
             if (n > 0 && deviation <= band + 1e-9) {
                 stretch.count = n;
-                stretch.scale = stretch.length / stretch.prefix[n];   // covers stretch exactly
+                stretch.scale = stretch.length / stretch.prefix[n];
                 continue;
             }
-            // Case 2: Out of band, but tiny inter-piece joints can absorb the residual difference
+            // Out of band: try absorbing the residual in small joints up to maxJoint
             double jointScale = Math.max(minScale, Math.min(maxScale, commonScale * Math.exp(band)));
             int fit = 0;
             while (fit + 1 < stretch.prefix.length && jointScale * stretch.prefix[fit + 1] <= stretch.length + 1e-6) {
@@ -779,14 +528,12 @@ public class SurroundGeometryEngine {
                 stretch.startGap = Math.max(0, rest / 2);
                 continue;
             }
-            // Case 3: Adjust fallback - scale piece as needed outside tolerance band
             if (adjust && n > 0) {
                 stretch.count = n;
                 stretch.scale = stretch.length / stretch.prefix[n];
                 config.sizeAdjustedStretches++;
                 continue;
             }
-            // Case 4: Center fallback - place integer count at common scale centered with symmetrical end gaps
             int centred = 0;
             while (centred + 1 < stretch.prefix.length && commonScale * stretch.prefix[centred + 1] <= stretch.length + 1e-6) {
                 centred++;
@@ -798,11 +545,9 @@ public class SurroundGeometryEngine {
                 config.sizeCenteredStretches++;
                 continue;
             }
-            // Case 5: Empty fallback - stretch remains uncovered
             config.sizeUnfittedStretches++;
         }
 
-        // Calculate and record diagnostic scale spread statistics
         double smallest = Double.MAX_VALUE, largest = 0;
         for (UniformStretch stretch : eligible) {
             if (stretch.count > 0) {
@@ -840,14 +585,12 @@ public class SurroundGeometryEngine {
         if (participants == 0) {
             return Math.max(minScale, Math.min(maxScale, 1));
         }
-        // Sort candidate scales in ascending logarithmic order
         values.sort((x, y) -> Double.compare(x[0], y[0]));
         int[] inWindow = new int[participants];
         int covered = 0, left = 0;
         double bestWidth = Double.MAX_VALUE, bestMiddle = 0;
         double bestFitting = Double.NaN;
 
-        // Two-pointer sliding window over sorted candidate scale values
         for (double[] right : values) {
             if (inWindow[(int) right[1]]++ == 0) {
                 covered++;
@@ -860,7 +603,6 @@ public class SurroundGeometryEngine {
                     bestMiddle = middle;
                 }
                 if (width <= 2 * band + 1e-12) {
-                    // Candidate fits within tolerance band; pick scale closest to 1.0 (log = 0)
                     double closest = Math.max(right[0] - band, Math.min(low + band, 0));
                     if (Double.isNaN(bestFitting) || Math.abs(closest) < Math.abs(bestFitting)) {
                         bestFitting = closest;
@@ -875,10 +617,7 @@ public class SurroundGeometryEngine {
         return Math.exp(Double.isNaN(bestFitting) ? bestMiddle : bestFitting);
     }
 
-    /**
-     * Solves for the common scale that maximizes the total linear perimeter length covered
-     * within the tolerance band, breaking ties by choosing the scale closest to 1.0.
-     */
+    /** Picks the scale maximizing total stretch length covered within the tolerance band (ties closest to 1). */
     private static double coverageScale(List<UniformStretch> stretches, double minScale, double maxScale, double band) {
         List<Double> candidates = new ArrayList<>();
         candidates.add(minScale);
@@ -914,16 +653,11 @@ public class SurroundGeometryEngine {
         return bestScale;
     }
 
-    /**
-     * Finds the piece count whose total scaled width is closest to the target stretch length
-     * using binary search (bisection) over prefix sums.
-     */
     private static int closestCount(UniformStretch stretch, double scale) {
         int lo = 1, hi = stretch.prefix.length - 1;
         if (hi < 1) {
             return 0;
         }
-        // Largest n with scale * P(n) <= length, by bisection (P increases with n)
         while (lo < hi) {
             int mid = (lo + hi + 1) / 2;
             if (scale * stretch.prefix[mid] <= stretch.length) {
@@ -932,35 +666,22 @@ public class SurroundGeometryEngine {
                 hi = mid - 1;
             }
         }
-        int best = lo;
-        if (lo + 1 < stretch.prefix.length
-                && Math.abs(scaleDeviation(stretch, scale, lo + 1)) < Math.abs(scaleDeviation(stretch, scale, lo))) {
-            best = lo + 1;
-        }
-        return best;
+        return (lo + 1 < stretch.prefix.length
+                && Math.abs(scaleDeviation(stretch, scale, lo + 1)) < Math.abs(scaleDeviation(stretch, scale, lo)))
+                ? lo + 1 : lo;
     }
 
-    /**
-     * Computes the logarithmic deviation between the candidate scale and the exact scale required
-     * to cover the stretch with n pieces: ln(L / (scale * P(n))).
-     */
     private static double scaleDeviation(UniformStretch stretch, double scale, int n) {
         return n < 1 ? Double.MAX_VALUE : Math.log(stretch.length / (scale * stretch.prefix[n]));
     }
 
-    /**
-     * Solves uniform gap spacing (Types 1 and 2) across a group of perimeter stretches.
-     * Keeps piece dimensions unscaled and adjusts inter-piece spacing (Type 1) or start/end margins (Type 2)
-     * so that gaps remain consistent across all stretches within uniformMaxGapDifference tolerance.
-     * Uses a sliding window over candidate gap values to minimize gap variance while placing as many pieces as possible.
-     */
+    /** Solves uniform gap spacing (types 1-2) via sliding window over candidate gaps within uniformMaxGapDifference. */
     private void solveSameGaps(SurroundConfig config, List<UniformStretch> group) {
         double tolerance = Math.max(0, config.uniformMaxGapDifference);
         double maxWidth = 0;
         for (HomePieceOfFurniture piece : selectedFurniture) {
             maxWidth = Math.max(maxWidth, getPieceSurroundingDimensions(piece)[0]);
         }
-        // Determine maximum piece capacity and resulting gap limits for each stretch
         double cap = 0;
         int[] fit = new int[group.size()];
         for (int j = 0; j < group.size(); j++) {
@@ -979,7 +700,7 @@ public class SurroundGeometryEngine {
             }
         }
         cap += maxWidth;
-        List<double[]> values = new ArrayList<>();   // entries: {gapDimension, participantIndex}
+        List<double[]> values = new ArrayList<>();   // {gap, participantIndex}
         List<UniformStretch> participants = new ArrayList<>();
         for (int j = 0; j < group.size(); j++) {
             UniformStretch stretch = group.get(j);
@@ -998,7 +719,7 @@ public class SurroundGeometryEngine {
             if (any) {
                 participants.add(stretch);
             } else if (fit[j] > 0) {
-                // Single piece with no variable spaces to share: center it along the stretch
+                // Single piece with no variable spaces to share: center it
                 stretch.count = fit[j];
                 stretch.startGap = Math.max(0, (stretch.length - stretch.prefix[fit[j]]) / 2);
             }
@@ -1006,7 +727,6 @@ public class SurroundGeometryEngine {
         if (participants.isEmpty()) {
             return;
         }
-        // Sort candidate gaps and evaluate optimal window
         values.sort((x, y) -> Double.compare(x[0], y[0]));
         int[] inWindow = new int[participants.size()];
         int covered = 0, left = 0;
@@ -1022,7 +742,7 @@ public class SurroundGeometryEngine {
                     bestMiddle = (right[0] + low) / 2;
                 }
                 if (width <= tolerance + 1e-9 && Double.isNaN(bestFitting)) {
-                    bestFitting = (right[0] + low) / 2;   // choose narrowest viable gaps
+                    bestFitting = (right[0] + low) / 2;   // narrowest viable gaps
                 }
                 if (--inWindow[(int) values.get(left)[1]] == 0) {
                     covered--;
@@ -1059,13 +779,6 @@ public class SurroundGeometryEngine {
         config.gapSpread = Math.max(config.gapSpread, largest - smallest);
     }
 
-    /**
-     * Fallback placement for short sides: places a single template object at the solved uniform scale
-     * centered at arc-length coordinate s.
-     *
-     * @param dims boolean array [width, depth, height] indicating which dimensions scale
-     * @param type surround algorithm type (3 or 4)
-     */
     private void placeUniformSingle(SidePath side, double s, boolean[] dims, int type) {
         HomePieceOfFurniture piece = selectedFurniture.get(0);
         double[] d = getPieceSurroundingDimensions(piece);
@@ -1076,10 +789,7 @@ public class SurroundGeometryEngine {
                 (float) (piece.getHeight() * (dims[2] ? scale : 1)), true, true);
     }
 
-    /**
-     * Pastes the placed pieces on the level of their face (switching the selected level and restoring it after),
-     * grouped per side, all together per level, or loose ({@code groupingMode}).
-     */
+    /** Pastes placed pieces on their face's level (switching and restoring selected level), grouped per groupingMode. */
     private void commitPlacedFurniture(SurroundConfig config) {
         if (newlyPlacedFurniture.isEmpty()) {
             return;
@@ -1087,7 +797,6 @@ public class SurroundGeometryEngine {
         Map<Level, List<HomePieceOfFurniture>> toPaste = new LinkedHashMap<>();
         String baseName = primaryTemplate.getName();
 
-        // 1. Organize pieces by grouping mode into per-level lists
         if (config.groupingMode == SurroundConfig.GROUP_PER_SIDE) {
             int sideNum = 1;
             for (List<HomePieceOfFurniture> sideList : sidePlacedGroups.values()) {
@@ -1111,7 +820,6 @@ public class SurroundGeometryEngine {
             }
         }
 
-        // 2. Commit items to the home model, preserving active level selection
         Level selectedLevel = home != null ? home.getSelectedLevel() : null;
         try {
             for (Map.Entry<Level, List<HomePieceOfFurniture>> entry : toPaste.entrySet()) {
@@ -1134,20 +842,12 @@ public class SurroundGeometryEngine {
         }
     }
 
-    // ---- Sides Geometry Construction & Traversal Ordering ----
+    // ---- Sides & traversal order ----
 
-    /**
-     * Constructs and parameterizes the list of {@link SidePath} perimeters for the given face
-     * in active traversal order (either native polygon order or reversed order).
-     * Ensures that outward/inward normal vectors (uy, -ux) consistently point toward the side where
-     * furniture pieces will be placed. Computes curved side end spans taking into account perpendicular
-     * edge distance offsets. Supports 0-degree collinear side merging (Item 11).
-     */
     List<SidePath> buildSides(Room face) {
         List<SidePath> sides = buildSidePaths(face);
         for (SidePath side : sides) {
-            // The corners of a curve follow the chord of its end objects, on the curve where they go
-            // when they're moved by a distance from the edge
+            // Curve ends follow the chord of their end objects on the offset curve
             double offset = activeConfig != null ? activeConfig.distanceOffset : 0;
             double backLength = side.isCurved() && offset != 0 ? side.frontLength(0, side.length, offset, 0) : side.length;
             side.endSpan = maxSurroundingWidth * (backLength > 1e-6 ? side.length / backLength : 1);
@@ -1155,16 +855,9 @@ public class SurroundGeometryEngine {
         return sides;
     }
 
-    /**
-     * Decomposes the vertices of a Room boundary into logical polyline sides and handles
-     * orientation reversal when placing items on the interior vs exterior.
-     * If traversal is reversed, reverses each sub-polyline vertex sequence and rotates the
-     * overall side ordering to preserve vertex alignment with original polygon indices.
-     */
     private List<SidePath> buildSidePaths(Room face) {
         float[][] points = face.getPoints();
-        boolean mergeCollinear = activeConfig != null && activeConfig.mergeCollinearSides;
-        List<int[]> logical = SideModel.logicalSides(points, mergeCollinear);
+        List<int[]> logical = SideModel.logicalSides(points, activeConfig != null && activeConfig.mergeCollinearSides);
         boolean reversed = isTraversalReversed(face, interiorFor(face));
         List<SidePath> sides = new ArrayList<>();
         if (!reversed) {
@@ -1172,7 +865,6 @@ public class SurroundGeometryEngine {
                 sides.add(new SidePath(SideModel.polyline(points, logical.get(i)), i, false));
             }
         } else {
-            // Traverse logical sides in reverse order and reverse each sub-polyline's point array
             for (int i = logical.size() - 1; i >= 0; i--) {
                 float[][] poly = SideModel.polyline(points, logical.get(i));
                 float[][] backwards = new float[poly.length][];
@@ -1181,7 +873,6 @@ public class SurroundGeometryEngine {
                 }
                 sides.add(new SidePath(backwards, i, true));
             }
-            // Rotate the collection so that the starting vertex aligns with the original polygon start
             int first = reversedFirstSide(points, logical);
             int startIndex = 0;
             for (int t = 0; t < sides.size(); t++) {
@@ -1192,8 +883,7 @@ public class SurroundGeometryEngine {
             Collections.rotate(sides, -startIndex);
         }
         if (interiorFor(face) && !sides.isEmpty()) {
-            // Inside, the outline is walked from the vertex where it starts outside, so that walked
-            // backwards (in the direction shown) the objects start at the same place
+            // Inside, start at the exterior start vertex so walking backwards (shown order) starts at the same place
             int n = points.length;
             int start = exteriorStartVertex(face, points, logical);
             for (int t = 0; t < sides.size(); t++) {
@@ -1208,7 +898,6 @@ public class SurroundGeometryEngine {
         return sides;
     }
 
-    /** Returns the index of the point where the exterior traversal of the room starts. */
     private static int exteriorStartVertex(Room room, float[][] points, List<int[]> logical) {
         if (!isShownReversed(room)) {
             return logical.get(0)[0];
@@ -1217,26 +906,15 @@ public class SurroundGeometryEngine {
         return (first[0] + first[1]) % points.length;
     }
 
-    /**
-     * Determines whether interior placement mode applies to the specified Room face.
-     * Open walls (e.g. wall chains that do not form a closed loop) are always treated as exterior.
-     *
-     * @return true for interior placement; false for exterior
-     */
     private boolean interiorFor(Room room) {
         return activeConfig.interior && !activeConfig.alwaysExterior.contains(room);
     }
 
-    /**
-     * Whether the points of the room are walked backwards so that the normal (uy, -ux) points inside (interior)
-     * or outside (exterior), whatever the winding of the polygon.
-     */
+    /** Whether room points are walked backwards so the normal (uy, -ux) points toward the chosen side. */
     static boolean isTraversalReversed(Room room, boolean interior) {
-        boolean clockWise = room.isClockwise();
-        return (!clockWise && !interior) || (clockWise && interior);
+        return room.isClockwise() == interior;
     }
 
-    /** Returns the index of the logical side walked first when the points are walked backwards. */
     private static int reversedFirstSide(float[][] points, List<int[]> logical) {
         int n = points.length;
         int wanted = ((n - 2) % n + n) % n;
@@ -1252,10 +930,7 @@ public class SurroundGeometryEngine {
         return first;
     }
 
-    /**
-     * Returns the default start of Type 7 as {logical side index, distance from the first point of that side}:
-     * the vertex where the exterior traversal starts, which is also the start used inside.
-     */
+    /** Default Type 7 start as {logicalSideIndex, nativeDistance}: matches the exterior start vertex. */
     static double[] defaultType7Start(Room room, boolean mergeCollinear) {
         float[][] points = room.getPoints();
         List<int[]> logical = SideModel.logicalSides(points, mergeCollinear);
@@ -1266,64 +941,28 @@ public class SurroundGeometryEngine {
         return new double[]{first, SideModel.length(SideModel.polyline(points, logical.get(first)))};
     }
 
-    /**
-     * Whether the points of the room are walked backwards in the direction shown to the user: the one of the
-     * exterior, so that inside and outside the objects follow the outline in the same direction.
-     */
+    /** Direction shown to the user: always the exterior walk, so inside and outside follow the same orientation. */
     static boolean isShownReversed(Room room) {
         return isTraversalReversed(room, false);
     }
 
-    /**
-     * Whether the objects of the room go from the end to the start of the traversal: inside, the traversal goes
-     * against the direction shown, so the reverse direction option is inverted there.
-     */
+    /** Inside, traversal runs opposite to the shown direction, so reverseDirection is inverted. */
     private boolean isReverseDirection(Room room) {
         return activeConfig.reverseDirection != interiorFor(room);
     }
 
-    /**
-     * Checks whether the specified side is excluded by user selection or marked as a forbidden
-     * interior shared partition wall.
-     */
     private boolean isSideExcluded(Room face, SidePath side, int sideCount) {
         if (face == null) {
             return false;
         }
         SurroundConfig.SideEnds ends = activeConfig.sideEnds.get(face);
-        if (ends == null || ends.skipped.length != sideCount) {
-            return false;
-        }
-        return ends.skipped[side.index] || (side.index < ends.forbidden.length && ends.forbidden[side.index]);
+        return ends != null && ends.skipped.length == sideCount
+                && (ends.skipped[side.index] || (side.index < ends.forbidden.length && ends.forbidden[side.index]));
     }
 
-    // ---- Free Stretches & Obstacle Clipping (Doors, Windows, Furniture, Contact Zones) ----
+    // ---- Free stretches & obstacles ----
 
-    /**
-     * Returns the active lateral fit tolerance for door and window openings.
-     *
-     * @return fit tolerance in cm (or 0.0 if disabled)
-     */
-    private double effectiveGapFitTolerance() {
-        return fitTolerance(activeConfig, true);
-    }
-
-    /**
-     * Returns the active lateral fit tolerance for existing furniture collisions.
-     *
-     * @return fit tolerance in cm (or 0.0 if disabled)
-     */
-    private double effectiveCollisionFitTolerance() {
-        return fitTolerance(activeConfig, false);
-    }
-
-    /**
-     * Resolves the allowable fit tolerance for obstacle boundaries.
-     * In Type 4 (reduce), fit tolerance is only permitted if uniform sizing is enabled.
-     *
-     * @param gap    true for door/window openings; false for furniture collisions
-     * @return allowable tolerance (cm)
-     */
+    /** Fit tolerance in cm (disabled for non-uniform Type 4 since pieces shrink to fit). */
     static double fitTolerance(SurroundConfig config, boolean gap) {
         boolean on = gap ? (config.splitAtObstacles || config.respectWindows) && config.enableGapFitTolerance
                 : config.avoidCollisions && config.enableCollisionFitTolerance;
@@ -1331,10 +970,6 @@ public class SurroundGeometryEngine {
                 ? Math.max(0.0, gap ? config.gapFitTolerance : config.collisionFitTolerance) : 0.0;
     }
 
-    /**
-     * Identifies all architectural pieces (doors, windows, pre-existing furniture) at the current
-     * floor level that physically intersect the vertical height range of the template objects.
-     */
     private List<HomePieceOfFurniture> obstaclesFor(Room face) {
         if (!activeConfig.splitAtObstacles && !activeConfig.respectWindows && !activeConfig.avoidCollisions) {
             return Collections.emptyList();
@@ -1349,11 +984,6 @@ public class SurroundGeometryEngine {
         return obstacles;
     }
 
-    /**
-     * Computes the global vertical elevation interval [bottom, top] across all selected template pieces.
-     *
-     * @return array containing {lowestElevation, highestElevation + height}
-     */
     private static float[] heightRange(List<HomePieceOfFurniture> objects) {
         float bottom = Float.MAX_VALUE, top = -Float.MAX_VALUE;
         for (HomePieceOfFurniture piece : objects) {
@@ -1363,10 +993,6 @@ public class SurroundGeometryEngine {
         return bottom > top ? new float[]{0f, 250f} : new float[]{bottom, top};
     }
 
-    /**
-     * Determines whether a candidate furniture piece vertically collides with the template pieces,
-     * taking into account door/window filters, custom height ranges, and vertical clearance tolerances.
-     */
     private static boolean interrupts(SurroundConfig config, HomePieceOfFurniture piece, Level level, float[] heights) {
         boolean isGap = piece.isDoorOrWindow();
         if (isGap ? (isWindow(piece) ? !config.respectWindows : !config.splitAtObstacles) : !config.avoidCollisions) {
@@ -1376,7 +1002,6 @@ public class SurroundGeometryEngine {
                 && overlapsHeightBand(config, piece, heights, isGap, fitTolerance(config, isGap));
     }
 
-    /** Checks whether {@code piece} intersects the effective vertical height interval (respecting custom gap range). */
     private static boolean overlapsHeightBand(SurroundConfig config, HomePieceOfFurniture piece,
             float[] heights, boolean isGap, double tol) {
         boolean chosenHeights = isGap && config != null && config.gapHeightRange;
@@ -1387,7 +1012,6 @@ public class SurroundGeometryEngine {
         return z1 > low + zTol && z0 < high - zTol;
     }
 
-    /** Appends blocked intervals longer than 1 cm, inverting coordinates when the side is reversed. */
     private static void addBlockedIntervals(List<double[]> dst, List<double[]> raw, double sideLength, boolean reversed) {
         for (double[] b : raw) {
             double start = reversed ? sideLength - b[1] : b[0];
@@ -1399,17 +1023,8 @@ public class SurroundGeometryEngine {
     }
 
     /**
-     * Calculates the exact linear obstacle sub-stretches along each side of a face for interactive display
-     * in SideEndsPanel, classified into 5 distinct categories:
-     * <ul>
-     *   <li>0 = doors</li>
-     *   <li>1 = windows</li>
-     *   <li>2 = furniture / objects</li>
-     *   <li>3 = walls touching or overlapping the side</li>
-     *   <li>4 = floors touching or overlapping the side</li>
-     * </ul>
-     * Only the exact sub-interval where each collision occurs is returned (never coloring the entire side
-     * because of the room's own perimeter wall or a parallel wall running along the back of the side).
+     * Exact obstacle sub-stretches per side for SideEndsPanel display, tagged by kind:
+     * 0 = doors, 1 = windows, 2 = furniture, 3 = touching walls (excluding the side's own wall), 4 = touching floors.
      */
     static List<List<double[]>> obstacleStretches(Home home, SurroundConfig config, Room face, List<float[][]> sides, boolean reversed,
             List<HomePieceOfFurniture> pieces, List<HomePieceOfFurniture> objects, double objectDepth) {
@@ -1435,8 +1050,7 @@ public class SurroundGeometryEngine {
             }
             SidePath side = new SidePath(points, i, reversed);
 
-            // 0 (doors), 1 (windows), and 2 (furniture): always show doors, windows, and furniture in the
-            // Excluded Stretches editor so the user can see and click their exact sub-stretches regardless of toggles
+            // Show doors, windows, and furniture regardless of toggles so the user can pick their intervals
             for (HomePieceOfFurniture piece : pieces) {
                 boolean isGap = piece.isDoorOrWindow();
                 double tol = isGap ? gapTol : colTol;
@@ -1448,7 +1062,6 @@ public class SurroundGeometryEngine {
                 addBlockedIntervals(targetList, blockedAlong(side, piece, 0, side.length, objectDepth, offset, tol), side.length, reversed);
             }
 
-            // 3: Walls touching or overlapping the side (excluding any wall that runs parallel along this side itself!)
             if (ends != null && i < ends.overlapSegments.size()) {
                 addBlockedIntervals(byKind[3], ends.overlapSegments.get(i), side.length, false);
             }
@@ -1462,7 +1075,6 @@ public class SurroundGeometryEngine {
                 }
             }
 
-            // 4: Floors (rooms) touching or overlapping the side
             if (home != null && home.getRooms() != null) {
                 for (Room otherRoom : home.getRooms()) {
                     if (otherRoom != face && (sourceRooms == null || !sourceRooms.contains(otherRoom))
@@ -1486,17 +1098,12 @@ public class SurroundGeometryEngine {
         return stretches;
     }
 
-    /**
-     * Determines whether an architectural opening is a window (starts elevated above floor level > 1 cm)
-     * or a door (starts flush with the floor).
-     */
     static boolean isWindow(HomePieceOfFurniture piece) {
         return piece.isDoorOrWindow() && piece.getElevation() > 1f;
     }
 
     /**
-     * Stretches of [from, to] free of door and window openings, furniture (with "Avoid collisions"), contacts
-     * between walls and excluded stretches, as
+     * Stretches of [from, to] free of openings, furniture collisions, wall contacts, and excluded segments:
      * {start, end, startsAtObstacle (1/0), endsAtObstacle (1/0), startFitTol, endFitTol}.
      */
     private List<double[]> freeStretches(Room face, SidePath side, double from, double to, double stripDepth, double offset) {
@@ -1504,17 +1111,14 @@ public class SurroundGeometryEngine {
         if (to - from <= EPSILON) {
             return stretches;
         }
-        double gapTol = effectiveGapFitTolerance();
-        double colTol = effectiveCollisionFitTolerance();
-        // Each blocked entry: {startAlongSide, endAlongSide, lateralTolAllowed}
-        List<double[]> blocked = new ArrayList<>();
+        double gapTol = fitTolerance(activeConfig, true);
+        double colTol = fitTolerance(activeConfig, false);
+        List<double[]> blocked = new ArrayList<>();   // {start, end, lateralTol}
 
-        // 1. Doors and windows ("Respect door and window openings") and existing furniture ("Avoid collisions"), Item 6
         for (HomePieceOfFurniture obstacle : currentObstacles) {
             blocked.addAll(blockedAlong(side, obstacle, from, to, stripDepth, offset, obstacle.isDoorOrWindow() ? gapTol : colTol));
         }
 
-        // 2. Partial wall-to-wall contact/overlap zones and user-excluded segments (Item 12)
         if (face != null) {
             SurroundConfig.SideEnds ends = activeConfig.sideEnds.get(face);
             if (ends != null && side.index < ends.skipped.length) {
@@ -1527,7 +1131,6 @@ public class SurroundGeometryEngine {
             }
         }
 
-        // Sort blocked intervals in ascending order along side coordinate
         blocked.sort((a, b) -> Double.compare(a[0], b[0]));
         double cursor = from;
         boolean startsAtObstacle = false;
@@ -1542,7 +1145,6 @@ public class SurroundGeometryEngine {
             if (b[0] >= to) {
                 break;
             }
-            // If there is a free interval between cursor and obstacle start, record stretch
             if (b[0] - cursor > 1 || (b[0] + b[2]) - (cursor - prevEndTol) > 1) {
                 stretches.add(new double[]{cursor, b[0], startsAtObstacle ? 1 : 0, 1, prevEndTol, b[2]});
             }
@@ -1552,23 +1154,32 @@ public class SurroundGeometryEngine {
             }
             startsAtObstacle = true;
         }
-        // Record final trailing free stretch up to 'to' coordinate
         if (to - cursor > 1 || (!startsAtObstacle && to > cursor) || (to - (cursor - prevEndTol) > 1 && prevEndTol > 0)) {
             stretches.add(new double[]{cursor, to, startsAtObstacle ? 1 : 0, 0, prevEndTol, 0.0});
         }
         return stretches;
     }
 
+    private static float[][] segmentBand(float[] origin, double[] u, double nx, double ny,
+            double lo, double hi, double near, double far) {
+        double p0x = origin[0] + u[0] * lo, p0y = origin[1] + u[1] * lo;
+        double p1x = origin[0] + u[0] * hi, p1y = origin[1] + u[1] * hi;
+        return new float[][]{
+            {(float) (p0x + nx * near), (float) (p0y + ny * near)},
+            {(float) (p1x + nx * near), (float) (p1y + ny * near)},
+            {(float) (p1x + nx * far), (float) (p1y + ny * far)},
+            {(float) (p0x + nx * far), (float) (p0y + ny * far)}};
+    }
+
     /**
-     * Where along the side an obstacle crosses the strip of the objects (SAT on its footprint), as
-     * {start, end, lateral tolerance}; the tolerance shrinks the front of the strip by up to tol (keeping 20%).
+     * Where along the side an obstacle crosses the placement strip (SAT + local clip), as
+     * {start, end, lateralTolerance}; depth tolerance shrinks the front of the strip by up to tol (keeping >=20%).
      */
     private static List<double[]> blockedAlong(SidePath side, HomePieceOfFurniture obstacle, double from, double to,
             double stripDepth, double offset, double tol) {
         List<double[]> blocked = new ArrayList<>();
         boolean isGap = obstacle.isDoorOrWindow();
         float[][] polygon = obstacle.getPoints();
-        // Depth tolerance: shrink the front of the detection band by up to tol (keeping at least 20% of stripDepth)
         double effStripDepth = Math.max(stripDepth * 0.2, stripDepth - tol);
         double back = isGap ? Math.max(30.0, -offset) : (0.5 - offset - Math.min(tol * 0.5, stripDepth * 0.3));
         double front = isGap ? Math.max(0, offset) + effStripDepth : offset + effStripDepth;
@@ -1584,28 +1195,16 @@ public class SurroundGeometryEngine {
             double nx = u[1], ny = -u[0];
             double lo = i == 0 ? Math.min(0, from) : 0;
             double hi = i == side.segmentCount() - 1 ? Math.max(segmentLength, to - side.cumulative[i]) : segmentLength;
-            double[] p0 = {side.points[i][0] + u[0] * lo, side.points[i][1] + u[1] * lo};
-            double[] p1 = {side.points[i][0] + u[0] * hi, side.points[i][1] + u[1] * hi};
-            float[][] band = {
-                {(float) (p0[0] - nx * back), (float) (p0[1] - ny * back)},
-                {(float) (p1[0] - nx * back), (float) (p1[1] - ny * back)},
-                {(float) (p1[0] + nx * front), (float) (p1[1] + ny * front)},
-                {(float) (p0[0] + nx * front), (float) (p0[1] + ny * front)}};
-            // Test polygon overlap using 2D Separating Axis Theorem (SAT)
-            if (!polygonsOverlapSAT(band, polygon)) {
+            if (!polygonsOverlapSAT(segmentBand(side.points[i], u, nx, ny, lo, hi, -back, front), polygon)) {
                 continue;
             }
-            // Clip the obstacle polygon to the transverse strip [-back, front] in local (along, across) coordinates
-            // so oblique obstacles or long walls only block the exact sub-stretch where they cross the strip
+            // Clip obstacle polygon in local (along, across) coordinates so oblique/long items only block the crossed span
             List<double[]> localPoly = new ArrayList<>(polygon.length);
             for (float[] point : polygon) {
                 double dx = point[0] - side.points[i][0], dy = point[1] - side.points[i][1];
                 localPoly.add(new double[]{dx * u[0] + dy * u[1], dx * nx + dy * ny});
             }
-            localPoly = clip(localPoly, 1, -back, 1);
-            localPoly = clip(localPoly, 1, front, -1);
-            localPoly = clip(localPoly, 0, lo, 1);
-            localPoly = clip(localPoly, 0, hi, -1);
+            localPoly = clip(clip(clip(clip(localPoly, 1, -back, 1), 1, front, -1), 0, lo, 1), 0, hi, -1);
             if (localPoly.isEmpty()) {
                 continue;
             }
@@ -1617,17 +1216,14 @@ public class SurroundGeometryEngine {
             min = Math.max(lo, min);
             max = Math.min(hi, max);
             if (max > min + EPSILON) {
-                // Lateral tolerance at each end of the obstacle (capped at 45% of the obstacle width so it is never completely ignored)
+                // Cap lateral tolerance at 45% of obstacle width so narrow obstacles are never ignored completely
                 blocked.add(new double[]{side.cumulative[i] + min, side.cumulative[i] + max, Math.min(tol, (max - min) * 0.45)});
             }
         }
         return blocked;
     }
 
-    /**
-     * Computes where along a side a 2D polygon (such as a wall or adjacent room floor) intersects
-     * the placement strip in front of the side (from 0.5 cm off the boundary line to offset + effStripDepth).
-     */
+    /** Where a 2D polygon (wall or adjacent floor) intersects the placement strip in front of a side. */
     private static List<double[]> blockedPolygonAlong(SidePath side, float[][] polygon, double from, double to,
             double stripDepth, double offset, double tol, boolean ignoreCoincidentWall) {
         List<double[]> blocked = new ArrayList<>();
@@ -1646,21 +1242,12 @@ public class SurroundGeometryEngine {
             }
             double[] u = side.direction(i);
             double nx = u[1], ny = -u[0];
-            // If this polygon is a wall whose own long axis runs parallel and coincident with this segment
-            // (i.e. the wall that forms this room edge itself), skip it so we never paint the whole side!
             if (ignoreCoincidentWall && isCoincidentParallelWall(polygon, side.points[i], u, nx, ny, segmentLength)) {
                 continue;
             }
             double lo = i == 0 ? Math.min(0, from) : 0;
             double hi = i == side.segmentCount() - 1 ? Math.max(segmentLength, to - side.cumulative[i]) : segmentLength;
-            double[] p0 = {side.points[i][0] + u[0] * lo, side.points[i][1] + u[1] * lo};
-            double[] p1 = {side.points[i][0] + u[0] * hi, side.points[i][1] + u[1] * hi};
-            float[][] band = {
-                {(float) (p0[0] + nx * near), (float) (p0[1] + ny * near)},
-                {(float) (p1[0] + nx * near), (float) (p1[1] + ny * near)},
-                {(float) (p1[0] + nx * far), (float) (p1[1] + ny * far)},
-                {(float) (p0[0] + nx * far), (float) (p0[1] + ny * far)}};
-            java.awt.geom.Path2D.Float bandPath = SurroundTarget.toPath(band);
+            java.awt.geom.Path2D.Float bandPath = SurroundTarget.toPath(segmentBand(side.points[i], u, nx, ny, lo, hi, near, far));
             if (!bandPath.getBounds2D().intersects(polyBounds)) {
                 continue;
             }
@@ -1688,10 +1275,7 @@ public class SurroundGeometryEngine {
         return blocked;
     }
 
-    /**
-     * Checks whether a wall polygon is the structural wall forming the segment itself (runs parallel
-     * along {@code u} and straddles or touches the boundary line {@code across == 0} over most of the segment).
-     */
+    /** True if wallPoly is the structural wall running parallel along and hugging this segment itself. */
     private static boolean isCoincidentParallelWall(float[][] wallPoly, float[] segStart, double[] u,
             double nx, double ny, double segmentLength) {
         double maxEdge = 0;
@@ -1705,7 +1289,7 @@ public class SurroundGeometryEngine {
             }
         }
         if (longDir == null || Math.abs(longDir[0] * u[0] + longDir[1] * u[1]) < 0.96) {
-            return false; // Not parallel to the segment
+            return false;
         }
         double minAcross = Double.MAX_VALUE, maxAcross = -Double.MAX_VALUE;
         double minAlong = Double.MAX_VALUE, maxAlong = -Double.MAX_VALUE;
@@ -1719,39 +1303,24 @@ public class SurroundGeometryEngine {
             maxAcross = Math.max(maxAcross, across);
         }
         double overlapAlong = Math.min(segmentLength, maxAlong) - Math.max(0, minAlong);
-        // If the parallel wall straddles or hugs the boundary line (minAcross <= 1.5 cm) and covers > 50% of the segment
         return minAcross <= 1.5 && maxAcross >= -1.5 && overlapAlong > Math.min(25.0, segmentLength * 0.5);
     }
 
-    /**
-     * Translates excluded or contact intervals stored in room-native vertex order into side-relative arc lengths.
-     *
-     * @param intervals list of intervals [s0, s1] in native room order
-     */
     private static void addBlockedIntervals(SidePath side, List<double[]> intervals, List<double[]> blocked, double tol) {
         for (double[] interval : intervals) {
             double s0 = side.reversed ? (side.length - interval[1]) : interval[0];
             double s1 = side.reversed ? (side.length - interval[0]) : interval[1];
             if (s1 > s0 + EPSILON) {
-                double edgeTol = Math.min(tol, (s1 - s0) * 0.45);
-                blocked.add(new double[]{s0, s1, edgeTol});
+                blocked.add(new double[]{s0, s1, Math.min(tol, (s1 - s0) * 0.45)});
             }
         }
     }
 
-    // ---- Types 1 to 6 (Unified Surround Algorithm & Per-Side Dispatch) ----
+    // ---- Types 1 to 6 ----
 
-    /**
-     * Executes the unified surround placement across all perimeter sides of a face (Types 1 to 6).
-     * Computes perpendicular distance offsets for each side (allowing furniture runs to expand
-     * outward or inward by activeConfig.distanceOffset), establishes corner intersections, and
-     * delegates to {@link #surroundUnifiedSides(Room, List, int)}. Offsets are safely cleaned up
-     * in a {@code finally} block upon completion.
-     */
     private void surroundUnified(Room face, List<SidePath> sides, int roomIdx) {
         int count = sides.size();
-        // Distance from the edge of each side: its objects go along a line moved by that distance,
-        // and the ends of each side go where its line meets the line of the next side
+        // Each side's objects follow a line moved by distanceOffset; side ends meet where adjacent offset lines cross
         sideOffsets = new double[count];
         boolean offsets = false;
         for (int t = 0; t < count; t++) {
@@ -1769,17 +1338,12 @@ public class SurroundGeometryEngine {
         }
     }
 
-    /**
-     * Fills each side of a face that isn't excluded: works out its ends (corner margins or side end modes),
-     * places one object on short sides if asked, splits it into free stretches and fills them. The extra
-     * objects of the side ends are placed once all sides are.
-     */
     private void surroundUnifiedSides(Room face, List<SidePath> sides, int roomIdx) {
         int count = sides.size();
         currentRoomSideCount = count;
         double[][] cornerMargins = new double[count][2];
         int[][] extraObjects = new int[count][2]; // 0 = none, 1 = END_EXTRA_OBJECT, 2 = END_ADJACENT_TO_OBJECTS
-        List<double[]> extras = new ArrayList<>(); // entries: {sideIndex, position, forwardDirection (1/0), endType (0=start, 1=end), anchorIndex}
+        List<double[]> extras = new ArrayList<>(); // {sideIdx, pos, forward (1/0), endType (0=start, 1=end), anchorIdx}
         if (activeConfig.customSideEnds) {
             cornerOwnMargin = new boolean[count][2];
             computeCustomSideEnds(face, sides, cornerMargins, extraObjects);
@@ -1802,38 +1366,28 @@ public class SurroundGeometryEngine {
             currentSideOffset = sideOffsets != null ? sideOffsets[t] : 0;
             double pieceMargin = getEffectivePieceMargin();
             double[] range = sideRange(sides, t, cornerMargins[t][0], cornerMargins[t][1]);
-            double from = range[0];
-            double to = range[1];
-
+            double from = range[0], to = range[1];
             currentSidePlacedMin = Double.MAX_VALUE;
             currentSidePlacedMax = -Double.MAX_VALUE;
 
             if (to - from <= EPSILON) {
-                // Side is shorter than the space required by corner margins
                 if (activeConfig.shortSidesOneObject && !measuringUniform) {
                     placeShortSideObjectWithHierarchy(face, side, from - pieceMargin, to + pieceMargin, effectiveType);
                 }
             } else {
-                // Side has positive traversable length: extract free stretches avoiding obstacles
                 List<double[]> stretches = freeStretches(face, side, from, to, maxSurroundingDepth, currentSideOffset);
-                for (int st = 0; st < stretches.size(); st++) {
-                    double[] stretch = stretches.get(st);
-                    boolean wholeSide = stretch[2] == 0 && stretch[3] == 0;
+                for (double[] stretch : stretches) {
                     currentStretchStartTol = stretch.length > 4 ? stretch[4] : 0.0;
                     currentStretchEndTol = stretch.length > 5 ? stretch[5] : 0.0;
-                    fillStretch(side, stretch[0], stretch[1], wholeSide, effectiveType);
+                    fillStretch(side, stretch[0], stretch[1], stretch[2] == 0 && stretch[3] == 0, effectiveType);
                 }
                 currentStretchStartTol = 0.0;
                 currentStretchEndTol = 0.0;
             }
 
-            // Record extra corner/end objects if requested by custom side ends
             if (!measuringUniform) {
                 double stepGap = 2.0 * pieceMargin;
-                // "Object next to the vertex": one more object outside the side, before its first vertex
-                // or after its last one (the side itself is filled from vertex to vertex). "Next to the
-                // objects of the side": one more object right before the first one or after the last one.
-                // Both are placed once all the sides are, to be checked against the objects of the other sides
+                // Deferred until all sides are placed so extra end objects can be collision-checked against neighbor sides
                 int anchor = firstLevelPlacedFurniture.size();
                 if (extraObjects[t][0] == 1) {
                     extras.add(new double[]{t, from - stepGap, 0, 0, anchor});
@@ -1847,20 +1401,12 @@ public class SurroundGeometryEngine {
                 }
             }
         }
-        // Place and verify all accumulated extra corner/end objects
         placeExtraObjects(face, sides, roomIdx, extras);
         currentSideIndex = -1;
         currentVertexIndex = -1;
         currentSideOffset = 0;
     }
 
-    /**
-     * Evaluates start and end margin offsets and extra object flags for each side when customSideEnds is enabled.
-     * Handles modes: END_FIT (miter bisector fit), END_DISTANCE, END_EXTRA_OBJECT, and END_ADJACENT_TO_OBJECTS.
-     *
-     * @param margins      output margin array [side][0=start, 1=end] in cm
-     * @param extraObjects output extra object flags [side][0=start, 1=end]
-     */
     private void computeCustomSideEnds(Room face, List<SidePath> sides, double[][] margins, int[][] extraObjects) {
         int count = sides.size();
         // Inside, the start of a side in the direction shown is the end of its traversal
@@ -1883,7 +1429,7 @@ public class SurroundGeometryEngine {
                         extraObjects[t][end] = 2;
                         break;
                     case SurroundConfig.END_DISTANCE:
-                        margins[t][end] = -dist;   // + prolongs the side past its vertex, - shortens it
+                        margins[t][end] = -dist;   // + prolongs past vertex, - shortens
                         break;
                     case SurroundConfig.END_FIT: {
                         int v = (end == 0) ? t : (t + 1) % count;
@@ -1891,16 +1437,12 @@ public class SurroundGeometryEngine {
                         double[] geom = vertexGeometry(sides, v);
                         if (count < 2 || isSideExcluded(face, sides.get(neighbourIdx), count)
                                 || geom == null || Math.abs(geom[5]) <= 1e-4) {
-                            break;   // nothing surrounded beyond, or collinear: nothing to cover or avoid
+                            break;
                         }
                         int partnerMode = (end == 0) ? endMode : startMode;
                         if (geom[5] < 0) {
-                            // Convex corner: the strips leave an uncovered corner outside the vertex; this
-                            // side goes on up to the strip of the other one. When both ends there fit, only
-                            // the side that ends at the vertex goes on, so that they don't overlap.
-                            // Up to a right angle it goes on to the bisector (depth * tan(gamma)); when the
-                            // sides open more than that (the points of a star), the bisector runs away and
-                            // the uncovered corner ends one strip depth past the vertex, so it stops there
+                            // Convex corner: extend to bisector (capped at stripDepth for acute star points);
+                            // when both ends fit, only the incoming side extends to avoid overlap
                             boolean partnerCovers = partnerMode == SurroundConfig.END_FIT && end == 0;
                             margins[t][end] = partnerCovers ? 0.0 : -stripDepth * Math.min(geom[4], 1.0);
                             break;
@@ -1910,30 +1452,22 @@ public class SurroundGeometryEngine {
                         if (partnerMode == SurroundConfig.END_FIT) {
                             margins[t][end] = bisectorClearance;
                         } else {
-                            // An extra object fills back to the vertex
                             double partnerMargin = partnerMode == SurroundConfig.END_DISTANCE ? -((end == 0) ? endDist : startDist) : 0.0;
                             // Interior angle theta = pi - 2*gamma -> sin(theta) = 2*sin*cos, cos(theta) = 2*sin^2 - 1
                             double sinTheta = 2.0 * sinGamma * cosGamma;
                             double cosTheta = 2.0 * sinGamma * sinGamma - 1.0;
-                            double projFromPartner = partnerMargin * cosTheta + stripDepth * sinTheta;
-                            margins[t][end] = Math.max(bisectorClearance, projFromPartner);
+                            margins[t][end] = Math.max(bisectorClearance, partnerMargin * cosTheta + stripDepth * sinTheta);
                         }
                         break;
                     }
-                    default:   // at the vertex
+                    default:
                         break;
                 }
             }
         }
     }
 
-    /**
-     * Places the extra objects of the sides of a face once all its sides are: those at the end of a side
-     * first, so that at a corner where both ends ask for one, the side that ends there keeps it. They
-     * then take their place in the order of the placed objects, after the objects of their side.
-     *
-     * @param roomIdx zero-based Room index
-     */
+    /** Places end extras first (so the ending side wins contested corners), then splices them back after their side. */
     private void placeExtraObjects(Room face, List<SidePath> sides, int roomIdx, List<double[]> extras) {
         if (extras.isEmpty()) {
             return;
@@ -1958,7 +1492,6 @@ public class SurroundGeometryEngine {
                 }
             }
         }
-        // Restore placed extra objects after the models of their respective sides
         List<Integer> order = new ArrayList<>();
         for (int i = 0; i < placed.size(); i++) {
             order.add(i);
@@ -1970,25 +1503,17 @@ public class SurroundGeometryEngine {
         }
     }
 
-    /**
-     * Places an extra object along side t from coordinate {@code at}, forward or backward.
-     * Verifies that the piece does not violate door/window openings or user exclusions (if extraObjectRespectObstacles is active),
-     * and ensures that the piece does not penetrate into the Room or Wall interior geometry (if extraObjectRespectCorners is active).
-     *
-     * @param forward true to place forward (+), false backward (-)
-     */
     private void placeExtraObject(Room face, List<SidePath> sides, int t, double at, boolean forward, int vertex) {
         SidePath side = sides.get(t);
-        HomePieceOfFurniture piece = getNextSelectedPiece();
+        HomePieceOfFurniture piece = primaryTemplate;
         double[] d = getPieceSurroundingDimensions(piece);
         double center = at + (forward ? 1 : -1) * d[0] / 2.0;
         double objStart = center - d[0] / 2.0;
         double objEnd = center + d[0] / 2.0;
         boolean ignoreCollisions = true;
         if (activeConfig.extraObjectRespectObstacles) {
-            double checkFrom = Math.min(0.0, objStart);
-            double checkTo = Math.max(side.length, objEnd);
-            List<double[]> free = freeStretches(face, side, checkFrom, checkTo, maxSurroundingDepth, currentSideOffset);
+            List<double[]> free = freeStretches(face, side, Math.min(0.0, objStart), Math.max(side.length, objEnd),
+                    maxSurroundingDepth, currentSideOffset);
             boolean fitsInFreeStretch = false;
             for (double[] st : free) {
                 double sTol = st.length > 4 ? st[4] : 0.0;
@@ -2010,11 +1535,6 @@ public class SurroundGeometryEngine {
         place(side, center, d[1], piece, -1, -1, -1, true, ignoreCollisions);
     }
 
-    /**
-     * Checks whether a rectangular footprint penetrates into the architectural interior of a wall or floor figure at vertex k.
-     *
-     * @param footprint 2D rectangular bounding box coordinates
-     */
     private boolean getsIntoFigure(List<SidePath> sides, int k, double[] footprint) {
         double[] geom = vertexGeometry(sides, k);
         if (geom == null || Math.abs(geom[5]) <= 1e-4) {
@@ -2040,34 +1560,17 @@ public class SurroundGeometryEngine {
         return convexOverlap(corners, wedge(corner[0], corner[1], uIn, uOut)) > 0.5;
     }
 
-    /**
-     * Queries the perpendicular distance offset of neighbor side i, returning 0 if excluded.
-     *
-     * @return offset in cm
-     */
     private double neighbourOffset(Room face, List<SidePath> sides, int i) {
         return isSideExcluded(face, sides.get(i), sides.size()) ? 0 : activeConfig.distanceOffset;
     }
 
-    /**
-     * Computes the 2D intersection point where the offset lines of two adjacent sides meet at vertex k.
-     *
-     * @return 2D intersection coordinate array [x, y, t, sAlong]
-     */
     private double[] offsetCorner(List<SidePath> sides, int k) {
         int count = sides.size();
         return offsetCorner(sides, k, sideOffsets != null ? sideOffsets[(k - 1 + count) % count] : 0,
                 sideOffsets != null ? sideOffsets[k] : 0);
     }
 
-    /**
-     * Calculates the intersection of two offset lines meeting at vertex k:
-     * the incoming side moved perpendicularly by d1 and the outgoing side moved by d2.
-     *
-     * @param d1    incoming offset distance (cm)
-     * @param d2    outgoing offset distance (cm)
-     * @return array containing {x, y, position past end of incoming side, position along outgoing side}
-     */
+    /** Intersection of the incoming (offset d1) and outgoing (offset d2) lines at vertex k: {x, y, pastIn, alongOut}. */
     private static double[] offsetCorner(List<SidePath> sides, int k, double d1, double d2) {
         int count = sides.size();
         SidePath previous = sides.get((k - 1 + count) % count);
@@ -2082,34 +1585,20 @@ public class SurroundGeometryEngine {
         double rx = uOut[1] * d2 - uIn[1] * d1;
         double ry = -uOut[0] * d2 + uIn[0] * d1;
         double det = -uIn[0] * uOut[1] + uOut[0] * uIn[1];
-        double t, sAlong;
-        if (Math.abs(det) < 1e-6) {
-            t = 0;
-            sAlong = 0;
-        } else {
-            t = (-rx * uOut[1] + uOut[0] * ry) / det;
-            sAlong = (uIn[0] * ry - uIn[1] * rx) / det;
-        }
+        double t = Math.abs(det) < 1e-6 ? 0 : (-rx * uOut[1] + uOut[0] * ry) / det;
+        double sAlong = Math.abs(det) < 1e-6 ? 0 : (uIn[0] * ry - uIn[1] * rx) / det;
         return new double[]{v[0] + uIn[1] * d1 + uIn[0] * t, v[1] - uIn[0] * d1 + uIn[1] * t, t, sAlong};
     }
 
-    /**
-     * Returns the active inter-piece margin distance (in cm), or 0.0 if piece margin is disabled.
-     *
-     * @return effective piece margin in cm
-     */
     private double getEffectivePieceMargin() {
         return activeConfig.enablePieceMargin ? activeConfig.pieceMargin : 0.0;
     }
 
     /**
-     * Fills the free stretch [from, to] of a side with the given type. On a curve the fronts of the objects
-     * don't take the same length as the side, so the stretch is laid out on its narrowest line and stretched back.
+     * Lays out a stretch [from, to]: on curves, measures along the narrowest line (front on concave curves)
+     * and stretches positions back onto the side.
      */
     private void fillStretch(SidePath side, double from, double to, boolean wholeSide, int surroundType) {
-        // On a concave curve the fronts of the objects come closer than their backs: the objects
-        // are laid out on the front line and their positions stretched back onto the side. Moved by
-        // a distance, the stretch may go straight beyond the ends of the curve (1:1 there)
         double wallLength = to - from;
         layoutFrom = from;
         layoutStretch = 1;
@@ -2127,8 +1616,6 @@ public class SurroundGeometryEngine {
                 layoutCurveEnd = curveEnd;
                 layoutStretch = (curveEnd - curveStart) / layoutCurveLayout;
                 wallLength = layoutPre + layoutCurveLayout + (to - curveEnd);
-                // Moved by a distance, the backs of the objects go along a curve shorter (concave) or
-                // longer (convex) than the side: their widths are measured on it
                 curveWidthFactor = currentSideOffset != 0
                         ? (curveEnd - curveStart) / side.frontLength(curveStart, curveEnd, currentSideOffset, 0) : 1;
             }
@@ -2142,14 +1629,8 @@ public class SurroundGeometryEngine {
     }
 
     /**
-     * Lays out the objects of a free stretch with types 1 to 6 (same size or spaces: {@link #layOutUniform}).
-     * If they slightly exceed it, the tolerances at its ends (currentStretchStartTol/EndTol) absorb it.
-     * Type 1: equal spaces; 2: contiguous and centered (joints of 2 &times; pieceMargin); 3: enlarged to cover it;
-     * 4: one more object than fits, reduced to cover it; 5: contiguous from the start (end if reversed);
-     * 6: whole objects, with the ones at the ends resized to close it.
-     *
-     * @param from       start of the stretch along the side (cm)
-     * @param wallLength length of the stretch (cm)
+     * Types 1-6 layout: 1 equal gaps, 2 centered with 2*pieceMargin joints, 3 enlarged to fill, 4 reduced to fill,
+     * 5 contiguous from start/end, 6 whole pieces with resized end(s). Slight overflows use stretch end tolerances.
      */
     private void layOutStretch(SidePath side, double from, double wallLength, boolean wholeSide, int surroundType) {
         if (usesUniform(surroundType)) {
@@ -2158,7 +1639,6 @@ public class SurroundGeometryEngine {
         }
         double pieceMargin = getEffectivePieceMargin();
 
-        // 1. Collect candidate pieces that fit within the stretch
         List<HomePieceOfFurniture> wallPieces = new ArrayList<>();
         List<double[]> wallPieceDims = new ArrayList<>();
         double accumulatedWidth = 0.0;
@@ -2166,19 +1646,18 @@ public class SurroundGeometryEngine {
         double maxExtraTol = (surroundType != 4) ? (currentStretchStartTol + currentStretchEndTol) : 0.0;
         while (true) {
             checkCancelled();
-            HomePieceOfFurniture candidate = getNextSelectedPiece();
+            HomePieceOfFurniture candidate = primaryTemplate;
             double[] dims = getPieceSurroundingDimensions(candidate);
             double candW = dims[0];
             if (candW <= EPSILON) {
                 break;
             }
-            // Margin around each piece: positive separates by 2 * pieceMargin, negative overlaps by 2 * |pieceMargin|
+            // Positive margin separates by 2*pieceMargin, negative overlaps by 2*|pieceMargin|
             double stepW = (!wallPieces.isEmpty() ? Math.max(-candW * 0.9, 2.0 * pieceMargin) : 0.0) + candW;
             boolean fitsDirectly = accumulatedWidth + stepW <= wallLength + EPSILON;
             boolean fitsWithTol = !fitsDirectly && maxExtraTol > EPSILON
                     && accumulatedWidth + stepW <= wallLength + maxExtraTol + EPSILON;
             if (fitsWithTol) {
-                // Fits within the allowed obstacle/collision overlap tolerance!
                 double neededExtra = (accumulatedWidth + stepW) - wallLength;
                 double totalTol = currentStretchStartTol + currentStretchEndTol;
                 double usedStart = Math.min(currentStretchStartTol, totalTol > EPSILON ? neededExtra * (currentStretchStartTol / totalTol) : 0.0);
@@ -2188,10 +1667,9 @@ public class SurroundGeometryEngine {
                 }
                 from -= usedStart * layoutStretch;
                 wallLength += usedStart + usedEnd;
-                maxExtraTol = 0.0; // Tolerance consumed for this stretch
+                maxExtraTol = 0.0;
             }
             if (fitsDirectly || fitsWithTol || surroundType == 4) {
-                // Type 4 reduces pieces: include the overflow piece so the total scale factor drops below 1.0
                 wallPieces.add(candidate);
                 wallPieceDims.add(dims);
                 accumulatedWidth += stepW;
@@ -2214,16 +1692,12 @@ public class SurroundGeometryEngine {
 
         boolean reverseDir = isReverseDirection(currentProcessingRoom);
         boolean symmetricEnds = activeConfig.symmetricBothEnds;
-
-        // Item 2: Resolve which dimensions adapt in resizing modes (Types 3, 4, and 6)
         boolean[] dims = dimensionFlags();
 
-        // 2. Dispatch to specific surround algorithm layout
         switch (surroundType) {
             case 1:
             case 2:
             case 5: {
-                // Type 1: equal inter-piece gaps; Type 2: centered with equal end gaps; Type 5: continuous from start/end
                 double gap = 2.0 * pieceMargin;
                 double cursor = 0.0;
                 if (surroundType == 1) {
@@ -2242,23 +1716,17 @@ public class SurroundGeometryEngine {
             }
             case 3:
             case 4: {
-                // Types 3 and 4: Continuous proportional scaling without gaps
                 double scale = wallLength / Math.max(EPSILON, accumulatedWidth);
                 double cursor = 0.0;
                 for (int i = 0; i < m; i++) {
-                    double[] d = wallPieceDims.get(i);
-                    cursor += placeResized(side, from + cursor, wallPieces.get(i), d, scale, dims);
+                    cursor += placeResized(side, from + cursor, wallPieces.get(i), wallPieceDims.get(i), scale, dims);
                 }
                 break;
             }
             case 6: {
-                // Type 6: Whole models with resized pieces at the adjusted end(s).
-                // 1) When symmetricBothEnds is active and the stretch is not evenly divisible by the piece width,
-                //    reserve at least 2 resized end pieces (reducing full middle pieces by 1 if remainingGap is 0
-                //    or too small) so the last object at EACH end genuinely has a different (resized) width.
-                // 2) When customSideEnds with END_FIT is active on an unadjusted end (or single-end adjustment),
-                //    preserve the resized piece size that the natural side length (without the END_FIT extension)
-                //    had at the adjusted end, inserting additional full pieces before it in the extended space.
+                // Type 6: whole pieces + resized end(s).
+                // - symmetricBothEnds: when indivisible, ensure distinct resized pieces at both ends.
+                // - END_FIT on single-end mode: keep the natural-length end piece width and fill newly extended space before it.
                 double remainingGap = wallLength - accumulatedWidth;
                 boolean adjustStart = symmetricEnds || reverseDir;
                 boolean adjustEnd = symmetricEnds || !reverseDir;
@@ -2266,48 +1734,33 @@ public class SurroundGeometryEngine {
                 double[] extraDims = getPieceSurroundingDimensions(extraPiece);
 
                 if (symmetricEnds) {
-                    // Check if the stretch is evenly divisible by the piece width; if not, both ends must get a resized piece
                     double cursor = 0.0;
                     if (remainingGap > EPSILON) {
                         if (m >= 2 && remainingGap / 2.0 < wallPieceDims.get(0)[0] / 2.0) {
-                            // Free one full piece so both ends receive distinct resized pieces rather than widening into 1
                             accumulatedWidth -= wallPieceDims.remove(--m)[0];
                             wallPieces.remove(m);
                             remainingGap = wallLength - accumulatedWidth;
                         }
                         double endScale = (remainingGap / 2.0) / extraDims[0];
-                        // Start end resized piece
                         cursor += placeResized(side, from + cursor, extraPiece, extraDims, endScale, dims);
-                        // Full intermediate pieces
                         cursor = placePieceRow(side, from, cursor, 0.0, wallPieces, wallPieceDims);
-                        // End resized piece
                         placeResized(side, from + cursor, extraPiece, extraDims, endScale, dims);
                     } else {
-                        // Exactly divisible: place all m full pieces
                         placePieceRow(side, from, 0.0, 0.0, wallPieces, wallPieceDims);
                     }
                     break;
                 }
 
-                // Single-end adjustment (either end when !reverseDir, or start when reverseDir).
-                // If END_FIT extended the side, keep the same last resized piece width as before END_FIT,
-                // placing any newly added pieces before that last piece.
                 double targetLastWidth = -1.0;
                 if (wholeSide && activeConfig.customSideEnds && !side.isCurved()
                         && (activeConfig.globalStartEndMode == SurroundConfig.END_FIT
                                 || activeConfig.globalEndEndMode == SurroundConfig.END_FIT)) {
-                    double baseLen = side.length;
-                    double w0 = extraDims[0];
+                    double baseLen = side.length, w0 = extraDims[0];
                     if (w0 > EPSILON && baseLen > EPSILON && Math.abs(wallLength - baseLen) > EPSILON) {
                         int baseM = (int) Math.floor((baseLen + EPSILON) / w0);
                         double baseRem = baseLen - baseM * w0;
-                        if (baseRem <= EPSILON) {
-                            targetLastWidth = w0;
-                        } else if (baseRem < w0 / 2.0 && baseM >= 1) {
-                            targetLastWidth = w0 + baseRem;
-                        } else {
-                            targetLastWidth = baseRem;
-                        }
+                        targetLastWidth = baseRem <= EPSILON ? w0
+                                : (baseRem < w0 / 2.0 && baseM >= 1) ? w0 + baseRem : baseRem;
                         if (targetLastWidth > wallLength + EPSILON) {
                             targetLastWidth = -1.0;
                         }
@@ -2315,8 +1768,6 @@ public class SurroundGeometryEngine {
                 }
 
                 if (targetLastWidth > EPSILON) {
-                    // Keep the last placed piece identical in size to what it was before END_FIT;
-                    // fill the space before it with whole pieces and resize the piece right before it if needed.
                     double spaceBeforeLast = Math.max(0.0, wallLength - targetLastWidth);
                     double w0 = extraDims[0];
                     int countBefore = (int) Math.floor((spaceBeforeLast + EPSILON) / w0);
@@ -2357,13 +1808,7 @@ public class SurroundGeometryEngine {
                 }
                 for (int i = 0; i < m; i++) {
                     double[] d = wallPieceDims.get(i);
-                    double extra = 0;
-                    if (i == 0 && widenStart) {
-                        extra += gapPerEnd;
-                    }
-                    if (i == m - 1 && widenEnd) {
-                        extra += gapPerEnd;
-                    }
+                    double extra = (i == 0 && widenStart ? gapPerEnd : 0) + (i == m - 1 && widenEnd ? gapPerEnd : 0);
                     if (extra > EPSILON) {
                         cursor += placeResized(side, from + cursor, wallPieces.get(i), d, (d[0] + extra) / d[0], dims);
                     } else {
@@ -2381,7 +1826,6 @@ public class SurroundGeometryEngine {
         }
     }
 
-    /** Places a contiguous row of unresized pieces with an optional inter-piece gap, returning the new cursor. */
     private double placePieceRow(SidePath side, double from, double cursor, double gap,
             List<HomePieceOfFurniture> pieces, List<double[]> dims) {
         for (int i = 0; i < pieces.size(); i++) {
@@ -2392,12 +1836,6 @@ public class SurroundGeometryEngine {
         return cursor;
     }
 
-    /**
-     * Resolves which bounding dimensions adapt when resizing pieces (Item 2): {width, depth, height}.
-     * Width always scales in resizing modes (Types 3, 4, and 6).
-     *
-     * @return boolean array [widthScales, depthScales, heightScales]
-     */
     private boolean[] dimensionFlags() {
         int mode = activeConfig.dimModifyMode;
         boolean depth = mode == SurroundConfig.DIM_PROPORTIONAL || (mode == SurroundConfig.DIM_SELECTED && activeConfig.dimModifyD);
@@ -2405,14 +1843,6 @@ public class SurroundGeometryEngine {
         return new boolean[]{true, depth, height};
     }
 
-    /**
-     * Places a furniture piece resized by the given scale factor, starting at arc-length coordinate {@code start}.
-     *
-     * @param start           starting arc-length position (cm)
-     * @param surroundingDims original surrounding bounding dimensions [width, depth]
-     * @param dims            boolean array [width, depth, height] indicating which dimensions scale
-     * @return the linear width (cm) occupied along the side by the placed piece
-     */
     private double placeResized(SidePath side, double start, HomePieceOfFurniture piece, double[] surroundingDims,
             double scale, boolean[] dims) {
         double scaleAcross = dims[1] ? scale : 1.0;
@@ -2425,13 +1855,7 @@ public class SurroundGeometryEngine {
         return newWidth;
     }
 
-    /**
-     * Calculates the unrotated width and depth required for a furniture model such that,
-     * when rotated by piece.getAngle(), its oriented bounding dimensions match
-     * (scaleAlong * surroundingWidth) and (scaleAcross * surroundingDepth).
-     *
-     * @return array containing {newWidth, newDepth}
-     */
+    /** Unrotated {width, depth} needed so the rotated piece matches (scaleAlong, scaleAcross) on the side. */
     private static float[] pieceDimensionsFor(HomePieceOfFurniture piece, double scaleAlong, double scaleAcross) {
         double w = piece.getWidth(), d = piece.getDepth();
         if (Math.abs(scaleAlong - scaleAcross) < 1e-9) {
@@ -2457,28 +1881,20 @@ public class SurroundGeometryEngine {
         return new float[]{(float) (w * scaleAlong), (float) (d * scaleAlong)};
     }
 
-    /**
-     * Fallback placement for short sides: positions a single template object centered within
-     * the largest free interval that does not violate door/window openings or corner margins.
-     */
     private void placeShortSideObjectWithHierarchy(Room face, SidePath side, double rawFrom, double rawTo, int effectiveType) {
-        double spanStart = Math.min(rawFrom, rawTo);
-        double spanEnd = Math.max(rawFrom, rawTo);
+        double spanStart = Math.min(rawFrom, rawTo), spanEnd = Math.max(rawFrom, rawTo);
         List<double[]> free = freeStretches(face, side, 0, side.length, maxSurroundingDepth, currentSideOffset);
         if (free.isEmpty()) {
-            return; // Completely blocked by a door/window gap or user-excluded segment (higher priority)
+            return;
         }
-        // Pick the largest free sub-stretch on this short side and center the object within the intersection with corner bounds
         double[] best = free.get(0);
         for (double[] st : free) {
             if ((st[1] - st[0]) > (best[1] - best[0])) {
                 best = st;
             }
         }
-        double center = 0.5 * (Math.max(best[0], spanStart) + Math.min(best[1], spanEnd));
-        if (Math.max(best[0], spanStart) > Math.min(best[1], spanEnd)) {
-            center = 0.5 * (best[0] + best[1]);
-        }
+        double lo = Math.max(best[0], spanStart), hi = Math.min(best[1], spanEnd);
+        double center = lo > hi ? 0.5 * (best[0] + best[1]) : 0.5 * (lo + hi);
         if ((effectiveType == 3 || effectiveType == 4) && usesUniform(effectiveType)) {
             placeUniformSingle(side, center, dimensionFlags(), effectiveType);
         } else {
@@ -2486,26 +1902,15 @@ public class SurroundGeometryEngine {
         }
     }
 
-    /** Places a single template object centered at arc-length coordinate s. */
     private void placeCentered(SidePath side, double s) {
-        HomePieceOfFurniture piece = getNextSelectedPiece();
-        double[] dims = getPieceSurroundingDimensions(piece);
-        // Respect avoidCollisions if enabled (hasCollision already accounts for collisionFitTolerance)
-        place(side, s, dims[1], piece, -1, -1, -1, true, !activeConfig.avoidCollisions);
+        double[] dims = getPieceSurroundingDimensions(primaryTemplate);
+        place(side, s, dims[1], primaryTemplate, -1, -1, -1, true, !activeConfig.avoidCollisions);
     }
 
-    /** Normalized X component of the current wall surface normal vector. */
     private double currentWallNormalX = 0.0;
-
-    /** Normalized Y component of the current wall surface normal vector. */
     private double currentWallNormalY = -1.0;
 
-    /**
-     * Places a piece at distance s along the side, at its depth from the edge and facing out of it
-     * (compensating the bulge of curves).
-     *
-     * @param width                  width to give it (-1 keeps the piece's); likewise pieceDepth and height
-     */
+    /** Places a piece at distance s along the side, compensating curve bulge. Dimensions of -1 keep template values. */
     private void place(SidePath side, double s, double depth, HomePieceOfFurniture piece,
             float width, float pieceDepth, float height, boolean applyTemplateBaseAngle, boolean ignoreCollisions) {
         if (layoutStretch != 1) {
@@ -2542,32 +1947,22 @@ public class SurroundGeometryEngine {
         double nx = u[1], ny = -u[0];
         currentWallNormalX = nx;
         currentWallNormalY = ny;
-        double across = currentSideOffset + depth / 2.0;   // distance from the edge, then half the depth
+        double across = currentSideOffset + depth / 2.0;
         createSurroundingFromTemplate(piece, (float) (point[0] + nx * across), (float) (point[1] + ny * across),
                 (float) Math.atan2(u[1], u[0]), width, pieceDepth, height, applyTemplateBaseAngle, ignoreCollisions, false);
     }
 
-    /**
-     * Computes the clearance distance along concave sides meeting at vertex k required to ensure
-     * that a model of the specified depth does not penetrate across the adjacent side when meeting
-     * at an acute angle (< 90 degrees).
-     *
-     * @param depth model depth in cm
-     * @return required clearance margin (cm)
-     */
+    /** Clearance needed at acute (<90 deg) concave corners so depth doesn't cross the adjacent side. */
     private static double acuteCornerMargin(List<SidePath> sides, int k, double depth) {
         double[] geometry = vertexGeometry(sides, k);
         if (geometry == null || geometry[5] <= 1e-4 || geometry[4] <= 1e-9) {
             return 0;
         }
-        double tanGamma = geometry[4];   // gamma: half the turn between both sides
+        double tanGamma = geometry[4];
         return Math.max(0, depth * (tanGamma * tanGamma - 1) / (2 * tanGamma));
     }
 
-    /**
-     * Geometry of vertex k (where side k starts): {bisector x, bisector y, cos, sin and tan of gamma (half the
-     * turn between the normals), turn}; turn &gt; 0 at a concave corner, &lt; 0 at a convex one; null if collinear.
-     */
+    /** Vertex k geometry: {bisectorX, bisectorY, cosGamma, sinGamma, tanGamma, turn}; turn>0 concave, <0 convex, null collinear. */
     private static double[] vertexGeometry(List<SidePath> sides, int k) {
         int count = sides.size();
         if (count < 2) {
@@ -2590,16 +1985,11 @@ public class SurroundGeometryEngine {
     // ---- Corners ----
 
     /**
-     * Margins of the sides at each vertex, and the corner pieces. Without pieces, at a concave corner the rows
-     * stop depth &times; tan(gamma) before it so they don't enter the other strip. With pieces, each one sits
-     * square on the bisector; in types 3 and 4 the size of the sides and of the piece depend on each other,
-     * so it repeats (up to 12 times) until they settle.
-     *
-     * @return margins [side][0 at its first vertex, 1 at its last one]
+     * Computes side end margins [side][0=start, 1=end] and places orthogonal corner pieces.
+     * In non-uniform types 3-4, side scale and corner piece scale depend on each other and relax up to 12 passes.
      */
     private double[][] computeCornerMarginsAndPlacePieces(Room face, List<SidePath> sides, int roomIdx) {
         int count = sides.size();
-        // sideMargins[side][0 = start at vertex t, 1 = end at vertex (t+1)%count]
         double[][] sideMargins = new double[count][2];
         cornerOwnMargin = new boolean[count][2];
         if (!activeConfig.enableCornerHandling || count < 2) {
@@ -2607,11 +1997,9 @@ public class SurroundGeometryEngine {
         }
         double wallStripDepth = Math.max(0.0, maxSurroundingDepth);
         if (!activeConfig.placeOrthogonalCornerPiece) {
-            // Empty corners: at a concave corner each side stops before entering the depth strip of the other
             for (int k = 0; k < count; k++) {
                 int prevIdx = (k - 1 + count) % count;
                 double[] geometry = vertexGeometry(sides, k);
-                // geometry[4] = tanGamma, geometry[5] = cornerTurn (>0 for concave / inward turns)
                 double m = geometry != null && geometry[5] > 1e-4
                         && !isSideExcluded(face, sides.get(prevIdx), count) && !isSideExcluded(face, sides.get(k), count)
                         ? wallStripDepth * geometry[4] : 0.0;
@@ -2621,8 +2009,7 @@ public class SurroundGeometryEngine {
             return sideMargins;
         }
 
-        // When orthogonal corner pieces are enabled, each corner piece is owned by the side that departs
-        // from that vertex in traversal order (or by the previous side if the departing side is excluded).
+        // Each corner piece belongs to the departing side (or previous side if departing is excluded)
         HomePieceOfFurniture[] bases = new HomePieceOfFurniture[count];
         int[] ownerSide = new int[count];
         boolean[] placeCorner = new boolean[count];
@@ -2638,9 +2025,6 @@ public class SurroundGeometryEngine {
             placeCorner[k] = !nextSkipped || !previousSkipped;
         }
 
-        // Types 3 and 4 size the objects of each side to cover it; corner pieces take that dynamic size,
-        // which in turn alters the remaining longitudinal length available to the side. Both must be
-        // solved iteratively until convergence (relaxation loop up to 12 passes).
         boolean sizedBySide = (activeConfig.surroundType == 3 || activeConfig.surroundType == 4)
                 && !usesUniform(activeConfig) && activeConfig.customCornerPiece == null
                 && !activeConfig.cornerKeepSize;
@@ -2659,7 +2043,6 @@ public class SurroundGeometryEngine {
             if (!sizedBySide) {
                 break;
             }
-            // Check convergence of side scales across all sides
             double change = 0;
             for (int t = 0; t < count; t++) {
                 double scale = estimatedSideScale(face, sides, t, sideMargins);
@@ -2667,11 +2050,10 @@ public class SurroundGeometryEngine {
                 sideScale[t] = scale;
             }
             if (change < 1e-4) {
-                break; // Converged within numerical tolerance
+                break;
             }
         }
 
-        // Commit corner pieces into the scene graph
         for (int k = 0; k < count; k++) {
             if (!placeCorner[k] || corners[k] == null) {
                 continue;
@@ -2687,37 +2069,28 @@ public class SurroundGeometryEngine {
         return sideMargins;
     }
 
-    /**
-     * Pose {x, y, angle} of the corner piece at vertex k, square on the bisector, and the margins it leaves to
-     * both sides (in sideMargins). If it would hit another corner piece, a door or window, furniture or the
-     * face, {@link VertexFit#nearest} looks for the smallest turn and shift over the vertex that avoids it.
-     */
+    /** Pose {x, y, angle} on the bisector at vertex k and the resulting sideMargins; nudges via VertexFit if blocked. */
     private double[] cornerPlacement(Room face, List<SidePath> sides, int k, HomePieceOfFurniture piece,
             double[][] sideMargins, List<double[]> placed) {
         int count = sides.size();
         int prevIdx = (k - 1 + count) % count;
         double[] geometry = vertexGeometry(sides, k);
         double bx = geometry[0], by = geometry[1], tanGamma = geometry[4], cornerTurn = geometry[5];
-        double rW = piece.getWidth() / 2.0;
-        double rD = piece.getDepth() / 2.0;
+        double rW = piece.getWidth() / 2.0, rD = piece.getDepth() / 2.0;
         double[] corner = offsetCorner(sides, k);
         double vx = corner[0], vy = corner[1];
         double[] uIn = sides.get(prevIdx).lastDirection();
         double[] uOut = sides.get(k).firstDirection();
         double angle = Math.atan2(uIn[1] + uOut[1], uIn[0] + uOut[0]);
 
-        // At a concave corner, the rear corners of the rectangular piece touch both wall lines simultaneously,
-        // which pushes the center outward along the bisector by rD + rW * tanGamma.
-        // If cornerTouchVertex is true, the center is kept at distance rD, allowing rear corners to clip into walls.
+        // At concave corners, push along bisector by rW*tanGamma so rear corners meet both walls unless cornerTouchVertex
         double bisectorDist = cornerTurn > 1e-4 && !activeConfig.cornerTouchVertex ? rD + rW * tanGamma : rD;
         double cx = vx + bx * bisectorDist;
         double cy = vy + by * bisectorDist;
 
-        // If collision avoidance or clearance against already placed corner pieces is needed
         if (placed != null) {
             double[] footprint = {cx, cy, Math.cos(angle), Math.sin(angle), rW, rD};
             if (cornerBlocked(sides, k, piece, footprint, placed)) {
-                // Search for the closest valid placement using VertexFit
                 double[] moved = new VertexFit(sides, k, corner, rW, rD).nearest(
                         f -> !getsIntoFace(f) && !cornerBlocked(sides, k, piece, f, placed));
                 if (moved != null) {
@@ -2730,13 +2103,11 @@ public class SurroundGeometryEngine {
             placed.add(footprint);
         }
 
-        // Calculate clearance margins along incoming and outgoing sides according to orthoSeparation mode
         int separation = activeConfig.orthoSeparation;
         double[] back = {-uIn[0], -uIn[1]};
         double marginIn, marginOut;
         switch (separation) {
             case SurroundConfig.ORTHO_SEPARATE: {
-                // Reserve margin up to where the corner piece exits the depth strip of each side, plus user margin
                 double depth = Math.max(0.0, maxSurroundingDepth);
                 double margin = activeConfig.cornerPieceMargin;
                 marginIn = stripSpan(cx, cy, angle, rW, rD, vx, vy, back, new double[]{uIn[1], -uIn[0]}, depth)[1] + margin;
@@ -2748,7 +2119,6 @@ public class SurroundGeometryEngine {
             case SurroundConfig.ORTHO_FIRST_VERTEX:
             case SurroundConfig.ORTHO_SECOND_VERTEX:
             case SurroundConfig.ORTHO_MID_VERTEX:
-                // Reserve margin based on distance to nearest, second-nearest, or midpoint of piece vertices
                 double[] dIn = cornerPieceDistances(cx, cy, angle, rW, rD, vx, vy, uIn);
                 double[] dOut = cornerPieceDistances(cx, cy, angle, rW, rD, vx, vy, new double[]{-uOut[0], -uOut[1]});
                 int nearest = separation == SurroundConfig.ORTHO_SECOND_VERTEX ? 1 : 0;
@@ -2766,24 +2136,17 @@ public class SurroundGeometryEngine {
         return new double[]{cx, cy, angle};
     }
 
-    /**
-     * {nearest, farthest} distances along `away` from the corner (vx, vy) of the part of a piece (centered at
-     * cx, cy) inside the strip of a side, from 0 to depth along `normal` (Sutherland-Hodgman clipping).
-     */
+    /** {nearest, farthest} distances along `away` from (vx, vy) of the piece portion inside strip [0, depth]. */
     static double[] stripSpan(double cx, double cy, double angle, double rW, double rD, double vx, double vy,
             double[] away, double[] normal, double depth) {
         double ca = Math.cos(angle), sa = Math.sin(angle);
         List<double[]> polygon = new ArrayList<>();
-        // Construct the 4 rotated corners of the piece relative to the vertex (vx, vy)
         for (double[] c : new double[][]{{-1, -1}, {1, -1}, {1, 1}, {-1, 1}}) {
             double px = cx + ca * rW * c[0] - sa * rD * c[1] - vx;
             double py = cy + sa * rW * c[0] + ca * rD * c[1] - vy;
-            // Project into (alongSide, acrossSide) local strip coordinates
             polygon.add(new double[]{px * away[0] + py * away[1], px * normal[0] + py * normal[1]});
         }
-        // Clip against strip boundaries acrossSide >= 0 and acrossSide <= depth
-        polygon = clip(polygon, 1, 0, 1);         // across >= 0
-        polygon = clip(polygon, 1, depth, -1);    // across <= depth
+        polygon = clip(clip(polygon, 1, 0, 1), 1, depth, -1);
         double nearest = polygon.isEmpty() ? 0 : Double.MAX_VALUE, extent = 0;
         for (double[] point : polygon) {
             nearest = Math.min(nearest, point[0]);
@@ -2792,7 +2155,7 @@ public class SurroundGeometryEngine {
         return new double[]{nearest, extent};
     }
 
-    /** Sutherland-Hodgman clipping of a convex polygon to sign &times; (point[axis] - limit) &ge; 0. */
+    /** Sutherland-Hodgman clip of a convex polygon to sign * (point[axis] - limit) >= 0. */
     private static List<double[]> clip(List<double[]> polygon, int axis, double limit, int sign) {
         List<double[]> out = new ArrayList<>();
         for (int i = 0; i < polygon.size(); i++) {
@@ -2809,14 +2172,6 @@ public class SurroundGeometryEngine {
         return out;
     }
 
-    /**
-     * Estimates the piece scaling factor applied by Types 3 and 4 along side {@code t} based on the
-     * currently reserved corner margins.
-     * Used by the iterative relaxation loop in {@link #computeCornerMarginsAndPlacePieces} to achieve
-     * mutual convergence of corner piece dimensions and adjacent side furniture scaling.
-     *
-     * @return estimated scaling factor (1.0 default if unplaced or no stretch)
-     */
     private double estimatedSideScale(Room face, List<SidePath> sides, int t, double[][] sideMargins) {
         SidePath side = sides.get(t);
         int count = sides.size();
@@ -2839,20 +2194,9 @@ public class SurroundGeometryEngine {
         double gap = Math.max(-width * 0.9, 2.0 * getEffectivePieceMargin());
         int fitting = (int) Math.floor((length + gap) / (width + gap) + 1e-9);
         int objects = activeConfig.surroundType == 4 ? fitting + 1 : fitting;
-        if (objects <= 0) {
-            return 1.0;
-        }
-        return length / (objects * width + (objects - 1) * gap);
+        return objects <= 0 ? 1.0 : length / (objects * width + (objects - 1) * gap);
     }
 
-    /**
-     * Calculates the valid longitudinal start and end offsets {@code [from, to]} along side {@code t},
-     * accounting for corner margins, user distance offsets, curved wall ends, and inter-piece margins.
-     *
-     * @param startMargin clearance margin at vertex {@code t}
-     * @param endMargin   clearance margin at vertex {@code (t+1)%count}
-     * @return a 2-element array {@code [from, to]} along the side's arc length
-     */
     private double[] sideRange(List<SidePath> sides, int t, double startMargin, double endMargin) {
         int count = sides.size();
         SidePath side = sides.get(t);
@@ -2874,13 +2218,6 @@ public class SurroundGeometryEngine {
             side.length - endMargin + endShift - (ownMargin[1] ? 0 : pieceMargin)};
     }
 
-    /**
-     * Determines whether a piece's footprint penetrates into the interior of the room face (or escapes
-     * it when surrounding in interior mode).
-     *
-     * @param footprint 6-element footprint array {@code [cx, cy, cos, sin, halfWidth, halfDepth]}
-     * @return true if the footprint violates face boundary containment by more than 0.5 cm
-     */
     private boolean getsIntoFace(double[] footprint) {
         float[][] points = new float[4][];
         double[][] corners = footprintCorners(footprint);
@@ -2898,11 +2235,6 @@ public class SurroundGeometryEngine {
         return !part.isEmpty() && bounds.getWidth() > 0.5 && bounds.getHeight() > 0.5;
     }
 
-    /**
-     * Whether a corner piece with that footprint {x, y, cos, sin, halfWidth, halfDepth} at vertex k would come
-     * too close to a placed corner piece, block a door or window of either side, or hit furniture or walls
-     * (with collision avoidance).
-     */
     private boolean cornerBlocked(List<SidePath> sides, int k, HomePieceOfFurniture piece, double[] footprint,
             List<double[]> placed) {
         double clearance = activeConfig.orthoSeparation == SurroundConfig.ORTHO_SEPARATE ? Math.max(0, activeConfig.cornerPieceMargin) : 0;
@@ -2911,7 +2243,6 @@ public class SurroundGeometryEngine {
                 return true;
             }
         }
-        // Along each incident side of the vertex, verify that the piece's footprint does not obstruct doors/windows
         int count = sides.size();
         double[] corner = offsetCorner(sides, k);
         double depth = Math.max(0.0, maxSurroundingDepth);
@@ -2925,11 +2256,10 @@ public class SurroundGeometryEngine {
             double from = end == 0 ? side.length + corner[2] - span[1] : corner[3] + span[0];
             double to = end == 0 ? side.length + corner[2] - span[0] : corner[3] + span[1];
             for (HomePieceOfFurniture obstacle : currentObstacles) {
-                // Only consider doors and windows aligned with this side
                 double alongSide = Math.sin(obstacle.getAngle()) * u[0] - Math.cos(obstacle.getAngle()) * u[1];
                 if (obstacle.isDoorOrWindow() && Math.abs(alongSide) < 0.1 && to - from > 0.5) {
                     for (double[] b : blockedAlong(side, obstacle, from, to, depth, sideOffsets != null ? sideOffsets[t] : 0,
-                            effectiveGapFitTolerance())) {
+                            fitTolerance(activeConfig, true))) {
                         if (Math.min(b[1], to) - Math.max(b[0], from) > 0.5) {
                             return true;
                         }
@@ -2955,10 +2285,6 @@ public class SurroundGeometryEngine {
         }
     }
 
-    /**
-     * Clones a base furniture piece and scales its width by {@code scale}, optionally scaling depth
-     * and height according to user configuration flags.
-     */
     private HomePieceOfFurniture scaledPiece(HomePieceOfFurniture base, double scale) {
         HomePieceOfFurniture piece = base.clone();
         if (Math.abs(scale - 1) > 1e-9 && piece.isResizable()) {
@@ -2974,13 +2300,7 @@ public class SurroundGeometryEngine {
         return piece;
     }
 
-    /**
-     * Computes the longitudinal distances from the corner vertex {@code (vx, vy)} along an incoming
-     * direction vector {@code uIn} to each of the 4 rotated corners of a corner piece, sorted in descending order.
-     *
-     * @param angle     piece rotation angle (radians)
-     * @return 4-element array of projected distances sorted from largest to smallest
-     */
+    /** Projected distances from (vx, vy) along uIn to the 4 piece corners, sorted descending. */
     static double[] cornerPieceDistances(double cx, double cy, double angle, double halfWidth, double halfDepth,
             double vx, double vy, double[] uIn) {
         double ca = Math.cos(angle), sa = Math.sin(angle);
@@ -2997,25 +2317,20 @@ public class SurroundGeometryEngine {
         return new double[]{distances[3], distances[2], distances[1], distances[0]};
     }
 
-    /**
-     * Obtains the template piece to be used for orthogonal corners, taking either the custom catalog
-     * model (if designated by user) or a scaled copy of the primary selected piece.
-     */
     private HomePieceOfFurniture getCornerTemplatePiece() {
         if (activeConfig.customCornerPiece != null) {
             HomePieceOfFurniture cornerPiece = activeConfig.customCornerPiece.clone();
             cornerPiece.setElevation(primaryTemplate.getElevation());
             return cornerPiece;
         }
-        return scaledPiece(getNextSelectedPiece(), cornerPieceScale);
+        return scaledPiece(primaryTemplate, cornerPieceScale);
     }
 
     // ---- Type 7 ----
 
     /**
-     * Type 7: the free sides form one path, along which the objects are spread, a fixed number evenly or one
-     * every type7Spacing, across the vertices. With corner handling, an object left over a vertex
-     * ({@link #findType7VertexObjects}) is fitted to it ({@link #fitType7VertexObject}). Sizes can vary at random.
+     * Type 7: joins free sides into one continuous 1D path, spreads a fixed count or fixed spacing across
+     * vertices, optionally rotates to a custom start point, and fits vertex-overhanging objects with VertexFit.
      */
     private void surroundType7(Room face, List<SidePath> sides, int roomIdx) {
         SurroundConfig config = activeConfig;
@@ -3023,8 +2338,8 @@ public class SurroundGeometryEngine {
         int objectCountSetting = config.type7ObjectCount;
         boolean reverse = isReverseDirection(face);
 
-        // Step 1: Build continuous obstacle-free stretches across all valid sides without clamping at intermediate vertices
-        List<double[]> stretches = new ArrayList<>(); // {sideIndexInSides, from, to, isBoundaryStart, isBoundaryEnd, userOffset, sTol, eTol}
+        // {sideIdx, from, to, isBoundaryStart, isBoundaryEnd, userOffset, sTol, eTol}
+        List<double[]> stretches = new ArrayList<>();
         double total = 0;
         for (int t = 0; t < count; t++) {
             SidePath side = sides.get(t);
@@ -3038,12 +2353,10 @@ public class SurroundGeometryEngine {
             double userOffset = activeConfig.distanceOffset;
             double frontDepth = Math.max(0, maxSurroundingDepth);
 
-            // In Type 7, do NOT apply corner clearance margins at intermediate contiguous vertices;
-            // only apply acute corner margins at the true start/end of an open or interrupted chain.
+            // Apply acute corner margin only at open/interrupted chain ends, not intermediate contiguous vertices
             double from = prevSkipped ? acuteCornerMargin(sides, t, frontDepth) : 0.0;
             double to = side.length - (nextSkipped ? acuteCornerMargin(sides, kNext, frontDepth) : 0.0);
 
-            // Apply corner offsets if user distance offset is non-zero
             if (userOffset != 0) {
                 double previousOffset = Math.min(userOffset, neighbourOffset(face, sides, kPrev));
                 double nextOffset = Math.min(userOffset, neighbourOffset(face, sides, kNext));
@@ -3054,7 +2367,6 @@ public class SurroundGeometryEngine {
                 continue;
             }
 
-            // Extract unblocked sub-stretches free from doors, windows, and obstacles
             List<double[]> free = freeStretches(face, side, from, to, maxSurroundingDepth + Math.max(0, userOffset), 0);
             for (int fs = 0; fs < free.size(); fs++) {
                 double[] stretch = free.get(fs);
@@ -3070,13 +2382,11 @@ public class SurroundGeometryEngine {
             return;
         }
 
-        // Apply custom Type 7 start point if configured for this face (rotates the 1D perimeter path
-        // so placement starts at the user-selected side and position along that side).
+        // Rotate the 1D path when a custom Type 7 start point is configured for this face
         double[] customStart = config.type7StartPoints != null ? config.type7StartPoints.get(face) : null;
         if (customStart != null && customStart.length >= 2) {
             int targetLogicalSide = (int) Math.round(customStart[0]);
             double targetNativeDist = customStart[1];
-            // Find the side t with side.index == targetLogicalSide
             int targetT = -1;
             for (int t = 0; t < count; t++) {
                 if (sides.get(t).index == targetLogicalSide) {
@@ -3086,9 +2396,8 @@ public class SurroundGeometryEngine {
             }
             if (targetT >= 0) {
                 SidePath targetSide = sides.get(targetT);
-                double targetS = targetSide.reversed ? (targetSide.length - targetNativeDist) : targetNativeDist;
-                targetS = Math.max(0.0, Math.min(targetSide.length, targetS));
-                // Locate the stretch containing (or nearest after) targetS on targetT
+                double targetS = Math.max(0.0, Math.min(targetSide.length,
+                        targetSide.reversed ? (targetSide.length - targetNativeDist) : targetNativeDist));
                 int splitIdx = -1;
                 double splitCoord = 0.0;
                 for (int idx = 0; idx < stretches.size(); idx++) {
@@ -3106,7 +2415,6 @@ public class SurroundGeometryEngine {
                     }
                 }
                 if (splitIdx < 0) {
-                    // Fallback: first stretch on or after targetT in traversal order
                     for (int step = 0; step < count && splitIdx < 0; step++) {
                         int candT = (targetT + step) % count;
                         for (int idx = 0; idx < stretches.size(); idx++) {
@@ -3122,13 +2430,11 @@ public class SurroundGeometryEngine {
                     List<double[]> rotated = new ArrayList<>();
                     double[] st = stretches.get(splitIdx);
                     if (splitCoord >= st[2] - EPSILON) {
-                        // At the end of the stretch: the path starts with the next one
                         splitIdx = (splitIdx + 1) % stretches.size();
                         st = stretches.get(splitIdx);
                         splitCoord = st[1];
                     }
                     if (splitCoord > st[1] + EPSILON && splitCoord < st[2] - EPSILON) {
-                        // Split the stretch at splitCoord: second half comes first, first half wraps to the end
                         double eTol = st.length > 7 ? st[7] : 0.0;
                         double sTol = st.length > 6 ? st[6] : 0.0;
                         rotated.add(new double[]{st[0], splitCoord, st[2], 0, st[4], st[5], 0.0, eTol});
@@ -3146,7 +2452,6 @@ public class SurroundGeometryEngine {
             }
         }
 
-        // Step 2: Determine longitudinal spacing and total piece count
         double spacing;
         int objectCount;
         if (objectCountSetting > 0) {
@@ -3162,16 +2467,13 @@ public class SurroundGeometryEngine {
             }
         }
 
-        // Step 3: Plan object placements along the cumulative 1D path
         List<Type7Object> planned = new ArrayList<>();
         for (int i = 0; i < objectCount; i++) {
             checkCancelled();
-            HomePieceOfFurniture activePiece = getNextSelectedPiece();
+            HomePieceOfFurniture activePiece = primaryTemplate;
             double[] activeDims = getPieceSurroundingDimensions(activePiece);
-            double activeSurrWidth = activeDims[0];
-            double activeSurrDepth = activeDims[1];
+            double activeSurrWidth = activeDims[0], activeSurrDepth = activeDims[1];
 
-            // Evaluate randomized dimensions (uniform or independent width/depth/height scaling)
             double scaleW = 1, scaleD = 1, scaleH = 1;
             if (config.randomizeAll) {
                 scaleW = scaleD = scaleH = getRandomScale(config.minAll, config.maxAll);
@@ -3189,15 +2491,12 @@ public class SurroundGeometryEngine {
             }
             double halfWidth = activeSurrWidth * (finalWidth / activePiece.getWidth()) / 2.0;
 
-            // Compute center position along continuous cumulative length
             double position = i * spacing + activeSurrWidth / 2.0;
             if (reverse) {
                 position = total - position;
             }
-            // Clamp strictly to the overall [0, total] path, never snapping at intermediate vertices
             position = Math.max(0.0, Math.min(total, position));
 
-            // Map cumulative 1D path coordinate back to its host side and local s coordinate
             double cumulative = 0;
             double[] stretch = null;
             for (double[] candidate : stretches) {
@@ -3217,12 +2516,10 @@ public class SurroundGeometryEngine {
             double s = from + (position - cumulative);
 
             // Clamp only at true external path boundaries (chain start/end or obstacle gaps)
-            boolean clampStart = stretch[3] == 1;
-            boolean clampEnd = stretch[4] == 1;
             double sTol = stretch.length > 6 ? stretch[6] : 0.0;
             double eTol = stretch.length > 7 ? stretch[7] : 0.0;
-            double minS = clampStart ? (from - sTol) + halfWidth : from;
-            double maxS = clampEnd ? (to + eTol) - halfWidth : to;
+            double minS = stretch[3] == 1 ? (from - sTol) + halfWidth : from;
+            double maxS = stretch[4] == 1 ? (to + eTol) - halfWidth : to;
             if (maxS >= minS - 1e-6) {
                 s = Math.max(minS, Math.min(maxS, s));
             } else if (config.shortSidesOneObject) {
@@ -3230,7 +2527,6 @@ public class SurroundGeometryEngine {
             }
             double effDepth = activeSurrDepth * (finalDepth / activePiece.getDepth());
 
-            // Build planned Type7Object metadata
             Type7Object object = new Type7Object();
             object.piece = activePiece;
             object.width = isRandomized ? (float) finalWidth : -1;
@@ -3245,7 +2541,6 @@ public class SurroundGeometryEngine {
             planned.add(object);
         }
 
-        // Step 4: Corner vertex fitting (if enabled)
         if (config.enableCornerHandling) {
             findType7VertexObjects(face, sides, planned);
             for (Type7Object object : planned) {
@@ -3255,7 +2550,6 @@ public class SurroundGeometryEngine {
             }
         }
 
-        // Step 5: Commit planned pieces to scene graph
         for (Type7Object object : planned) {
             currentRoomSideCount = count;
             currentSideIndex = sides.indexOf(object.side);
@@ -3263,7 +2557,6 @@ public class SurroundGeometryEngine {
             currentSideGroupKey = "R" + roomIdx + "_S" + (object.side.index + 1);
             sidePlacedGroups.putIfAbsent(currentSideGroupKey, new ArrayList<HomePieceOfFurniture>());
             if (object.vertex >= 0 && object.atVertex) {
-                // Placed at vertex with optimized non-linear fit
                 currentSideIndex = -1;
                 currentVertexIndex = object.vertex;
                 double[] f = object.footprint;
@@ -3271,71 +2564,29 @@ public class SurroundGeometryEngine {
                         object.width, object.depth, object.height, true, true, true);
                 currentVertexIndex = -1;
             } else {
-                // Placed straight along its host side path
                 place(object.side, object.s, object.depthOffset, object.piece, object.width, object.depth, object.height,
                         true, object.shortStretch);
             }
         }
     }
 
-    /**
-     * Minimum distance (in cm) an object's footprint must overhang past the end of its host side path
-     * to be considered candidate for corner vertex fitting.
-     */
     private static final double VERTEX_OVERHANG = 0.1;
-
-    /**
-     * Maximum allowable angular deflection (in degrees) that an object over a vertex may rotate away
-     * from the corner bisector normal. Beyond 45 degrees, an orthogonal side face of the piece would
-     * face the corner rather than its front/back.
-     */
+    /** Max turn (deg) from bisector normal; beyond 45 deg a side face would face the corner. */
     private static final double MAX_VERTEX_TURN = 44;
-
-    /**
-     * Minimum depth margin (in cm) by which the rear edge of a piece over a vertex must enclose the
-     * room corner vertex, preventing the corner from being exposed.
-     */
+    /** Minimum margin (cm) by which the piece's rear face must cover the corner vertex. */
     private static final double VERTEX_COVER = 1.0;
 
-    /**
-     * Represents a planned piece of furniture along the continuous Type 7 surrounding path before
-     * committing to the scene graph.
-     */
     private static final class Type7Object {
-        /** Source furniture template piece. */
         HomePieceOfFurniture piece;
-        /** Randomized width, depth, height (-1 if unscaled). */
         float width, depth, height;
-        /** Host side path containing this object's reference center. */
         SidePath side;
-        /** Longitudinal coordinate s along {@code side}. */
-        double s;
-        /** Total depth displacement across the side normal. */
-        double depthOffset;
-        /** User distance offset from wall. */
-        double userOffset;
-        /** Whether the hosting stretch is shorter than the piece width. */
-        boolean shortStretch;
-        /**
-         * 6-element footprint representation:
-         * {@code [center_x, center_y, cos(angle), sin(angle), half_width, half_depth]}.
-         */
+        double s, depthOffset, userOffset;
+        boolean shortStretch, settled = true, atVertex;
+        /** [cx, cy, cos(angle), sin(angle), halfWidth, halfDepth] */
         double[] footprint;
-        /** Index in the face polygon of the vertex this object lies over, or -1 if along a straight side. */
         int vertex = -1;
-        /** Whether the footprint is final (false while undergoing corner fitting). */
-        boolean settled = true;
-        /** Whether the object was successfully fitted at its vertex (true) or placed straight (false). */
-        boolean atVertex;
     }
 
-    /**
-     * Computes the 6-element footprint array {@code [cx, cy, cos, sin, halfWidth, halfDepth]}
-     * for a piece placed straight along a side path at longitudinal coordinate {@code s}.
-     *
-     * @param s           longitudinal coordinate along {@code side}
-     * @return 6-element footprint array
-     */
     private double[] straightFootprint(SidePath side, double s, double depthOffset, double halfWidth, double halfDepth) {
         double[] point = side.pointAt(s);
         double[] u = side.directionAt(s);
@@ -3343,10 +2594,7 @@ public class SurroundGeometryEngine {
         return new double[]{point[0] + u[1] * across, point[1] - u[0] * across, u[0], u[1], halfWidth, halfDepth};
     }
 
-    /**
-     * Marks the planned objects that stick out past a vertex by more than {@link #VERTEX_OVERHANG} (when objects
-     * of both sides do, the closest one), leaving them unsettled to be fitted to the vertex.
-     */
+    /** Marks the closest object overhanging each vertex past VERTEX_OVERHANG for vertex fitting. */
     private void findType7VertexObjects(Room face, List<SidePath> faceSides, List<Type7Object> planned) {
         int n = faceSides.size();
         if (measuringUniform || n < 2) {
@@ -3387,12 +2635,7 @@ public class SurroundGeometryEngine {
         }
     }
 
-    /**
-     * Fits an object over a vertex: turned and shifted (the face that was over the vertex stays over it) to
-     * touch the face and the objects on both sides without overlapping them ({@link VertexFit#touching});
-     * otherwise squared to the vertex where it is ({@link VertexFit#squareWhereItIs}), or left straight if
-     * that overlaps.
-     */
+    /** Fits an object over a vertex: touching both neighbors, or squared where it stands, or left straight. */
     private void fitType7VertexObject(List<SidePath> sides, Type7Object object, List<Type7Object> planned) {
         int n = sides.size();
         SidePath prevSide = sides.get((object.vertex - 1 + n) % n);
@@ -3400,7 +2643,6 @@ public class SurroundGeometryEngine {
         VertexFit fit = new VertexFit(sides, object.vertex, offsetCorner(sides, object.vertex, object.userOffset, object.userOffset),
                 object.footprint[4], object.footprint[5]);
 
-        // Identify the closest settled neighbour objects on both incoming and outgoing sides
         Type7Object before = null, after = null;
         for (Type7Object other : planned) {
             if (other == object || !other.settled) {
@@ -3418,7 +2660,6 @@ public class SurroundGeometryEngine {
 
         double[] best = null;
         if (before != null && after != null) {
-            // Collect any additional settled objects in the vicinity of the vertex
             List<double[]> others = new ArrayList<>();
             double near = 3 * (fit.halfWidth + fit.halfDepth);
             for (Type7Object other : planned) {
@@ -3428,16 +2669,13 @@ public class SurroundGeometryEngine {
                     others.add(f);
                 }
             }
-            // Non-linear dual-contact optimization
             best = fit.touching(before.footprint, after.footprint, others);
         }
         if (best == null) {
-            // Fallback: place square to the vertex where it currently stands and translate minimally to touch wall
             best = fit.squareWhereItIs(object.footprint[0], object.footprint[1]);
             if (best != null && fit.cover(best) < 0) {
                 best = null;
             }
-            // Check that fallback does not overlap settled objects
             for (int i = 0; best != null && i < planned.size(); i++) {
                 Type7Object other = planned.get(i);
                 if (other != object && other.settled && footprintGap(best, other.footprint) < -0.05) {
@@ -3452,28 +2690,18 @@ public class SurroundGeometryEngine {
         object.settled = true;
     }
 
-    /**
-     * Constructs a triangular bounding polygon representing the solid interior wedge at a convex vertex,
-     * extending outward by a large distance (1e5 cm) along incident wall directions.
-     *
-     * @return 3-point polygon array representing the wedge
-     */
+    /** Large solid interior wedge behind a convex vertex for SAT separation. */
     private static double[][] wedge(double vx, double vy, double[] uIn, double[] uOut) {
         double far = 1e5;
         return new double[][]{{vx, vy}, {vx - uIn[0] * far, vy - uIn[1] * far}, {vx + uOut[0] * far, vy + uOut[1] * far}};
     }
 
-    /**
-     * Non-linear geometric solver that determines optimal corner fitting poses for Type 7 objects.
-     * Evaluates candidate poses parameterized by rotation deflection {@code deg} (from bisector normal)
-     * and transverse shift {@code shift} across the bisector line.
-     */
+    /** Searches rotation/shift poses over a corner vertex touching the face without penetrating it. */
     private static final class VertexFit {
-        final double vx, vy, bx, by;   // corner vertex coordinates and unit bisector vector
-        final double[] uIn, uOut;      // unit directions of incoming and outgoing sides
-        final boolean concave;         // true for concave / reflex corners
-        final double halfWidth, halfDepth;
-        final double baseAngle;        // square bisector angle
+        final double vx, vy, bx, by;
+        final double[] uIn, uOut;
+        final boolean concave;
+        final double halfWidth, halfDepth, baseAngle;
 
         VertexFit(List<SidePath> sides, int vertex, double[] corner, double halfWidth, double halfDepth) {
             int n = sides.size();
@@ -3490,13 +2718,7 @@ public class SurroundGeometryEngine {
             this.baseAngle = Math.atan2(uIn[1] + uOut[1], uIn[0] + uOut[0]);
         }
 
-        /**
-         * A pose touching the face and both neighbors without overlapping them or the others: a grid of turns
-         * (&plusmn;44&deg;) and shifts (&plusmn;reach) gives the 8 best distinct seeds, each refined 5 times on a
-         * 5&times; finer grid.
-         *
-         * @return the footprint, or null if none fits
-         */
+        /** Coarse grid (+/-44 deg, +/-reach) picks 8 distinct seeds, each refined 5 times on a 5x finer grid. */
         double[] touching(double[] before, double[] after, List<double[]> others) {
             final double maxDeg = MAX_VERTEX_TURN;
             final int seedCount = 8;
@@ -3563,11 +2785,6 @@ public class SurroundGeometryEngine {
             return best;
         }
 
-        /**
-         * Finds the footprint pose closest to square bisector placement that satisfies an acceptance predicate.
-         *
-         * @return closest acceptable footprint, or null if none found
-         */
         double[] nearest(java.util.function.Predicate<double[]> accepts) {
             double reach = halfWidth + halfDepth;
             double degRange = MAX_VERTEX_TURN, shiftRange = reach, degStep = 2, shiftStep = Math.max(0.25, reach / 20);
@@ -3601,12 +2818,6 @@ public class SurroundGeometryEngine {
             return footprint(baseAngle + Math.toRadians(best[0]), best[1]);
         }
 
-        /**
-         * Objective error penalty function quantifying the deviation of a candidate pose:
-         * penalizes displacement, vertex exposure, and heavily penalizes neighbor/obstacle overlaps (10x penalty).
-         *
-         * @param deg    rotation angle deflection in degrees
-         */
         private double error(double deg, double shift, double[] before, double[] after, List<double[]> others) {
             double[] footprint = footprint(baseAngle + Math.toRadians(deg), shift);
             if (footprint == null) {
@@ -3624,20 +2835,12 @@ public class SurroundGeometryEngine {
             return err;
         }
 
-        /**
-         * Computes the 6-element footprint at rotation {@code angle}, displaced transversely by {@code shift}
-         * across the bisector, and translated along the bisector just enough to touch the wall geometry
-         * without penetrating it.
-         *
-         * @param angle absolute orientation angle (radians)
-         * @return 6-element footprint array, or null if wall contact cannot be established
-         */
+        /** Footprint rotated to angle, shifted across the bisector, and pushed along it to just touch the walls. */
         double[] footprint(double angle, double shift) {
             double cos = Math.cos(angle), sin = Math.sin(angle);
             double baseX = vx - by * shift, baseY = vy + bx * shift;
             double d;
             if (concave) {
-                // At concave corner: stay in front of both wall planes
                 d = -Double.MAX_VALUE;
                 for (double[] u : new double[][]{uIn, uOut}) {
                     double nx = u[1], ny = -u[0];
@@ -3648,7 +2851,7 @@ public class SurroundGeometryEngine {
                     d = Math.max(d, (radius(cos, sin, nx, ny) - ((baseX - vx) * nx + (baseY - vy) * ny)) / along);
                 }
             } else {
-                // At convex corner: separate from the solid wall wedge behind both sides (Separating Axis Theorem)
+                // Separate from the solid wall wedge behind both sides via SAT
                 double[][] wedge = wedge(vx, vy, uIn, uOut);
                 double[][] axes = {{cos, sin}, {-sin, cos}, {uIn[1], -uIn[0]}, {uOut[1], -uOut[0]},
                         {-(uIn[1] + uOut[1]), uIn[0] + uOut[0]}};
@@ -3668,14 +2871,9 @@ public class SurroundGeometryEngine {
                     double radius = radius(cos, sin, ax, ay);
                     double center = baseX * ax + baseY * ay;
                     double along = bx * ax + by * ay;
-                    double t;
-                    if (along > 1e-9) {
-                        t = (max + radius - center) / along;
-                    } else if (along < -1e-9) {
-                        t = (min - radius - center) / along;
-                    } else {
-                        t = center - radius >= max || center + radius <= min ? -Double.MAX_VALUE : Double.MAX_VALUE;
-                    }
+                    double t = along > 1e-9 ? (max + radius - center) / along
+                            : along < -1e-9 ? (min - radius - center) / along
+                            : (center - radius >= max || center + radius <= min ? -Double.MAX_VALUE : Double.MAX_VALUE);
                     d = Math.min(d, t);
                 }
                 if (d <= -1e8 || d >= 1e8) {
@@ -3685,27 +2883,17 @@ public class SurroundGeometryEngine {
             return new double[]{baseX + bx * d, baseY + by * d, cos, sin, halfWidth, halfDepth};
         }
 
-        /**
-         * Computes the directional half-extent (support radius) of the oriented rectangular piece along normal {@code (nx, ny)}.
-         */
         private double radius(double cos, double sin, double nx, double ny) {
             return halfWidth * Math.abs(cos * nx + sin * ny) + halfDepth * Math.abs(-sin * nx + cos * ny);
         }
 
-        /**
-         * Computes the footprint aligned squarely to the vertex angle from its current center {@code (x, y)},
-         * translated by the minimal distance required to touch the wall geometry without penetrating.
-         *
-         * @return adjusted 6-element footprint array, or null if invalid
-         */
+        /** Footprint squared to the bisector from (x, y) and translated minimally to touch the walls. */
         double[] squareWhereItIs(double x, double y) {
             double cos = Math.cos(baseAngle), sin = Math.sin(baseAngle);
             double[] center;
             if (concave) {
-                // Must stay in front of both wall normals
                 double[][] normals = {{uIn[1], -uIn[0]}, {uOut[1], -uOut[0]}};
                 double[] radius = {radius(cos, sin, normals[0][0], normals[0][1]), radius(cos, sin, normals[1][0], normals[1][1])};
-                // Find apex intersection where piece center touches both sides simultaneously
                 double n1x = normals[0][0], n1y = normals[0][1], n2x = normals[1][0], n2y = normals[1][1];
                 double det = n1x * n2y - n1y * n2x;
                 if (Math.abs(det) < 1e-9) {
@@ -3716,20 +2904,18 @@ public class SurroundGeometryEngine {
                 center = new double[]{apexX, apexY};
                 double bestDistance = Math.hypot(apexX - x, apexY - y);
 
-                // Alternatively test touching only one of the sides if closer to (x, y)
                 for (int i = 0; i < 2; i++) {
                     double nx = normals[i][0], ny = normals[i][1];
                     double move = radius[i] - ((x - vx) * nx + (y - vy) * ny);
                     double px = x + nx * move, py = y + ny * move;
                     double[] other = normals[1 - i];
-                    boolean inFront = (px - vx) * other[0] + (py - vy) * other[1] >= radius[1 - i] - 1e-9;
-                    if (inFront && Math.abs(move) < bestDistance) {
+                    if ((px - vx) * other[0] + (py - vy) * other[1] >= radius[1 - i] - 1e-9 && Math.abs(move) < bestDistance) {
                         bestDistance = Math.abs(move);
                         center = new double[]{px, py};
                     }
                 }
             } else {
-                // At convex corner: project center out of the Minkowski sum of wedge and piece
+                // Project center onto boundary of Minkowski sum of wedge and piece
                 double[][] corners = footprintCorners(new double[]{0, 0, cos, sin, halfWidth, halfDepth});
                 List<double[]> points = new ArrayList<>();
                 for (double[] w : wedge(vx, vy, uIn, uOut)) {
@@ -3758,12 +2944,7 @@ public class SurroundGeometryEngine {
             return new double[]{center[0], center[1], cos, sin, halfWidth, halfDepth};
         }
 
-        /**
-         * Evaluates whether the corner vertex is properly covered by the rear face of the piece.
-         *
-         * @param footprint 6-element footprint array
-         * @return signed distance of coverage surplus (&gt;= 0 when covered, &lt; 0 when vertex is exposed)
-         */
+        /** Signed margin (>= 0 when rear face encloses vertex by at least VERTEX_COVER). */
         double cover(double[] footprint) {
             double qx = -by, qy = bx;
             double min = Double.MAX_VALUE, max = -Double.MAX_VALUE;
@@ -3777,25 +2958,18 @@ public class SurroundGeometryEngine {
         }
     }
 
-    /**
-     * Computes the 2D convex hull of a set of points in counter-clockwise order using Andrew's monotone chain algorithm.
-     *
-     * @param points list of 2D points {@code [x, y]}
-     */
     private static List<double[]> convexHull(List<double[]> points) {
         List<double[]> sorted = new ArrayList<>(points);
         Collections.sort(sorted, (a, b) -> a[0] != b[0] ? Double.compare(a[0], b[0]) : Double.compare(a[1], b[1]));
         int n = sorted.size();
         double[][] hull = new double[2 * n][];
         int k = 0;
-        // Build lower hull
         for (int i = 0; i < n; i++) {
             while (k >= 2 && cross(hull[k - 2], hull[k - 1], sorted.get(i)) <= 0) {
                 k--;
             }
             hull[k++] = sorted.get(i);
         }
-        // Build upper hull
         for (int i = n - 2, lower = k + 1; i >= 0; i--) {
             while (k >= lower && cross(hull[k - 2], hull[k - 1], sorted.get(i)) <= 0) {
                 k--;
@@ -3805,33 +2979,17 @@ public class SurroundGeometryEngine {
         return new ArrayList<>(java.util.Arrays.asList(hull).subList(0, Math.max(1, k - 1)));
     }
 
-    /**
-     * 2D cross product of vectors {@code (a - o)} and {@code (b - o)}.
-     *
-     * @return positive if counter-clockwise turn, negative if clockwise, zero if collinear
-     */
     private static double cross(double[] o, double[] a, double[] b) {
         return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
     }
 
-    /**
-     * Computes the 4 corner coordinates of an oriented rectangular footprint.
-     *
-     * @param f 6-element footprint array {@code [cx, cy, cos, sin, halfWidth, halfDepth]}
-     * @return 4x2 array of corner coordinates
-     */
     private static double[][] footprintCorners(double[] f) {
         double ax = f[2] * f[4], ay = f[3] * f[4], dx = -f[3] * f[5], dy = f[2] * f[5];
         return new double[][]{{f[0] - ax - dx, f[1] - ay - dy}, {f[0] + ax - dx, f[1] + ay - dy},
             {f[0] + ax + dx, f[1] + ay + dy}, {f[0] - ax + dx, f[1] - ay + dy}};
     }
 
-    /**
-     * Calculates the minimum clearance gap between two footprints, or the negative penetration depth
-     * if they overlap.
-     *
-     * @return Euclidean distance (&gt; 0) if disjoint, or negative penetration depth (&lt;= 0) if overlapping
-     */
+    /** Positive distance when disjoint, negative penetration depth when overlapping. */
     private static double footprintGap(double[] a, double[] b) {
         double[][] pa = footprintCorners(a), pb = footprintCorners(b);
         double overlap = convexOverlap(pa, pb);
@@ -3849,13 +3007,7 @@ public class SurroundGeometryEngine {
         return gap;
     }
 
-    /**
-     * Computes the penetration depth of two overlapping convex polygons using the Separating Axis Theorem (SAT).
-     *
-     * @param pa 2D vertices of polygon A
-     * @param pb 2D vertices of polygon B
-     * @return penetration depth (&gt; 0 if overlapping, &lt;= 0 if separated)
-     */
+    /** SAT penetration depth (> 0 if overlapping, <= 0 if separated). */
     private static double convexOverlap(double[][] pa, double[][] pb) {
         double overlap = Double.MAX_VALUE;
         for (double[][] polygon : new double[][][]{pa, pb}) {
@@ -3884,32 +3036,19 @@ public class SurroundGeometryEngine {
         return overlap;
     }
 
-    /** Calculates the shortest Euclidean distance from a 2D point {@code p} to a line segment {@code [a, b]}. */
     private static double pointSegmentDistance(double[] p, double[] a, double[] b) {
         double dx = b[0] - a[0], dy = b[1] - a[1], l = dx * dx + dy * dy;
         double t = l == 0 ? 0 : Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l));
         return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
     }
 
-    // ---- Gradual property progression & Vertical stacking ----
+    // ---- Gradual properties & vertical stacking ----
 
-    /**
-     * Determines whether stochastic or gradual property variations should be applied to a piece.
-     * Corner pieces only receive variations if explicitly allowed by {@link SurroundRandomSettings#applyToCorners}.
-     *
-     * @param isCorner true if the target piece is placed at a corner vertex
-     */
     private static boolean appliesTo(SurroundRandomSettings settings, boolean isCorner) {
         return settings != null && (!isCorner || settings.applyToCorners);
     }
 
-    /**
-     * Produces a sanitized copy of random/gradual settings tailored for a specific piece.
-     * For corner pieces, depth randomization and orientation jitter are forcibly disabled to prevent
-     * corner pieces from detaching from wall surfaces or colliding with adjoining side furniture rows.
-     *
-     * @param isCorner true if the target piece is at a corner vertex
-     */
+    /** Corner pieces disable depth and angle jitter so they stay anchored to the corner without hitting side rows. */
     private static SurroundRandomSettings forPiece(SurroundRandomSettings settings, boolean isCorner) {
         if (!isCorner) {
             return settings;
@@ -3920,10 +3059,6 @@ public class SurroundGeometryEngine {
         return safe;
     }
 
-    /**
-     * Applies gradual property progression (color gradients, size ramps, elevation steps) across the
-     * base level of placed furniture according to the configured {@code gradualScope}.
-     */
     private void applyGradualToFirstLevel(SurroundConfig config) {
         if (!config.enableGradualProps || config.gradualSettings == null || !config.gradualSettings.hasAnyGradual()
                 || firstLevelPlacedFurniture.isEmpty()) {
@@ -3931,7 +3066,6 @@ public class SurroundGeometryEngine {
         }
         SurroundRandomSettings grad = config.gradualSettings;
         if (grad.gradualScope == SurroundRandomSettings.SCOPE_PER_LEVEL && config.enableVerticalStacking) {
-            // When scoped per-level, all pieces on the base level receive the t = 0.0 baseline value
             for (HomePieceOfFurniture piece : firstLevelPlacedFurniture) {
                 boolean isCorner = cornerBasePieces.contains(piece);
                 if (appliesTo(grad, isCorner)) {
@@ -3939,20 +3073,15 @@ public class SurroundGeometryEngine {
                 }
             }
         } else if (grad.gradualScope == SurroundRandomSettings.SCOPE_PER_SIDE) {
-            // Progression restarts from 0.0 to 1.0 along each individual side group
             for (List<HomePieceOfFurniture> side : sidePlacedGroups.values()) {
                 applyGradualInOrder(inShownOrder(side), grad, config.reverseDirection);
             }
         } else {
-            // Global progression: spans sequentially across all placed furniture from first to last
             applyGradualInOrder(inShownOrder(firstLevelPlacedFurniture), grad, config.reverseDirection);
         }
     }
 
-    /**
-     * Returns the pieces in the direction shown to the user: the pieces of each interior room, placed
-     * along its traversal, are taken backwards.
-     */
+    /** Reverses each interior room's run so pieces follow the user-visible direction. */
     private List<HomePieceOfFurniture> inShownOrder(List<HomePieceOfFurniture> pieces) {
         List<HomePieceOfFurniture> ordered = new ArrayList<>(pieces.size());
         int i = 0;
@@ -3972,12 +3101,6 @@ public class SurroundGeometryEngine {
         return ordered;
     }
 
-    /**
-     * Iterates through an ordered list of pieces and applies gradual properties parameterized by
-     * normalized progression ratio {@code t = idx / (m - 1)} in {@code [0.0, 1.0]}.
-     *
-     * @param reverse true if progression should be inverted from end to start
-     */
     private void applyGradualInOrder(List<HomePieceOfFurniture> pieces, SurroundRandomSettings grad, boolean reverse) {
         List<HomePieceOfFurniture> eligible = new ArrayList<>();
         for (HomePieceOfFurniture p : pieces) {
@@ -3994,11 +3117,7 @@ public class SurroundGeometryEngine {
         }
     }
 
-    /**
-     * Stacks levels of copies above the first one: each copy (of the clean piece when each level draws its own
-     * properties) goes up by the piece height or the chosen step, keeps the outward normal of its side, is
-     * dropped if it collides, and gets its own random and gradual properties.
-     */
+    /** Stacks copies above level 1, optionally re-drawing random properties from cleanBasePieces. */
     private void applyVerticalStacking(SurroundConfig config) {
         if (!config.enableVerticalStacking || config.verticalStackCount <= 0 || firstLevelPlacedFurniture.isEmpty()) {
             return;
@@ -4008,11 +3127,8 @@ public class SurroundGeometryEngine {
         for (int i = 0; i < count; i++) {
             elevations[i] = firstLevelPlacedFurniture.get(i).getElevation();
         }
-        boolean independentRandom = config.enableRandomProps
-                && config.randomSettings != null
-                && config.randomSettings.independentStackRandom
-                && config.randomSettings.hasAny();
-        // Place of each base piece in the direction shown, for the gradual properties of its copies
+        boolean independentRandom = config.enableRandomProps && config.randomSettings != null
+                && config.randomSettings.independentStackRandom && config.randomSettings.hasAny();
         Map<HomePieceOfFurniture, Integer> shownIndices = new IdentityHashMap<>();
         List<HomePieceOfFurniture> shownOrder = inShownOrder(firstLevelPlacedFurniture);
         for (int i = 0; i < count; i++) {
@@ -4024,7 +3140,6 @@ public class SurroundGeometryEngine {
                 HomePieceOfFurniture cleanSource = independentRandom ? cleanBasePieces.get(basePiece) : null;
                 HomePieceOfFurniture stackedCopy = (cleanSource != null ? cleanSource : basePiece).clone();
                 MaterialUtils.copyOutwardNormal(basePiece, stackedCopy);
-                // Each copy ascends by custom elevation step or by the height of the base object
                 elevations[i] += config.useCustomStackElevation ? (float) config.customStackElevation : basePiece.getHeight();
                 stackedCopy.setElevation(elevations[i]);
                 pieceRooms.put(stackedCopy, pieceRooms.get(basePiece));
@@ -4032,7 +3147,7 @@ public class SurroundGeometryEngine {
                 pieceVertexIndices.put(stackedCopy, pieceVertexIndices.get(basePiece));
                 pieceRoomSideCounts.put(stackedCopy, pieceRoomSideCounts.get(basePiece));
                 if (config.avoidCollisions && hasCollision(stackedCopy)) {
-                    continue; // Skip piece if collision detected with walls or existing geometry
+                    continue;
                 }
                 boolean isCorner = cornerBasePieces.contains(basePiece);
                 if (independentRandom && appliesTo(config.randomSettings, isCorner)) {
@@ -4060,21 +3175,13 @@ public class SurroundGeometryEngine {
         }
     }
 
-    // ---- Placing pieces & Collision / Floor Hole checks (Item 6) ----
+    // ---- Piece creation & collision checks ----
 
-    /**
-     * Creates a placed piece from the template: sizes it (when resizable) and turns it, drops it if it crosses
-     * a floor opening on an upper level or collides (unless ignored), remembers its outward normal and a clean
-     * copy for stacking, applies the random properties and records it.
-     *
-     * @param width                  width to give it (-1 keeps the template's); likewise depth and height
-     * @param isCornerPiece          whether it's a corner piece or a type 7 object fitted to a vertex
-     */
     private void createSurroundingFromTemplate(HomePieceOfFurniture template, float x, float y, float angle,
             float width, float depth, float height, boolean applyTemplateBaseAngle, boolean ignoreCollisions,
             boolean isCornerPiece) {
         if (measuringUniform) {
-            return;   // Type 8 first pass: dry-run to measure stretch lengths only
+            return;
         }
         HomePieceOfFurniture fCopy = template.clone();
         float pieceAngle = applyTemplateBaseAngle ? fCopy.getAngle() : 0f;
@@ -4092,12 +3199,8 @@ public class SurroundGeometryEngine {
         }
         fCopy.setAngle(pieceAngle + angle);
 
-        // Item 6: When working on levels above level 0, check floor holes behavior
-        if (isBlockedByUpperLevelFloorHole(fCopy)) {
-            return;
-        }
-
-        if (activeConfig.avoidCollisions && !ignoreCollisions && hasCollision(fCopy)) {
+        if (isBlockedByUpperLevelFloorHole(fCopy)
+                || (activeConfig.avoidCollisions && !ignoreCollisions && hasCollision(fCopy))) {
             return;
         }
 
@@ -4129,8 +3232,8 @@ public class SurroundGeometryEngine {
     }
 
     /**
-     * On upper levels with "Do not cross openings", whether the piece is over a floor opening; if there's no
-     * floor below it either, sets {@link SurroundConfig#skippedDueToNoFloorBelow} so the user is warned.
+     * On upper levels with FLOOR_HOLES_NO_PASS, drops pieces over floor openings and flags
+     * {@link SurroundConfig#skippedDueToNoFloorBelow} when no lower floor exists beneath them.
      */
     private boolean isBlockedByUpperLevelFloorHole(HomePieceOfFurniture candidate) {
         if (activeConfig.upperLevelFloorHolesMode != SurroundConfig.FLOOR_HOLES_NO_PASS || home == null) {
@@ -4140,8 +3243,7 @@ public class SurroundGeometryEngine {
         if (roomLevel == null || !isAboveLowestLevel(roomLevel)) {
             return false;
         }
-        List<Room> sameLevelRooms = new ArrayList<>();
-        List<Room> lowerLevelRooms = new ArrayList<>();
+        List<Room> sameLevelRooms = new ArrayList<>(), lowerLevelRooms = new ArrayList<>();
         for (Room r : home.getRooms()) {
             Level rl = r.getLevel();
             if (rl == roomLevel) {
@@ -4151,17 +3253,13 @@ public class SurroundGeometryEngine {
             }
         }
         if (sameLevelRooms.isEmpty()) {
-            return false;   // No floor polygons drawn on this level: cannot verify
+            return false;
         }
-        // Sample candidate footprint: center point plus 4 corners inset by 1 cm
         float[][] corners = getScaledPolygon(candidate, -2f, -2f);
-        List<float[]> points = new ArrayList<>();
+        List<float[]> points = new ArrayList<>(5);
         points.add(new float[]{candidate.getX(), candidate.getY()});
-        for (float[] corner : corners) {
-            points.add(corner);
-        }
-        boolean overHole = false;
-        boolean hasFloorBelow = true;
+        Collections.addAll(points, corners);
+        boolean overHole = false, hasFloorBelow = true;
         for (float[] point : points) {
             if (isOnAnyFloor(point[0], point[1], sameLevelRooms)) {
                 continue;
@@ -4174,10 +3272,9 @@ public class SurroundGeometryEngine {
         if (overHole && !hasFloorBelow) {
             activeConfig.skippedDueToNoFloorBelow = true;
         }
-        return overHole;   // Do not pass over floor hole
+        return overHole;
     }
 
-    /** Checks whether point {@code (x, y)} lies inside the polygon boundary of any room in the list. */
     private static boolean isOnAnyFloor(float x, float y, List<Room> rooms) {
         for (Room r : rooms) {
             if (SurroundTarget.toPath(r.getPoints()).contains(x, y)) {
@@ -4187,7 +3284,6 @@ public class SurroundGeometryEngine {
         return false;
     }
 
-    /** Returns true if the level's elevation is strictly greater than the lowest level elevation in the home. */
     private boolean isAboveLowestLevel(Level level) {
         List<Level> levels = home.getLevels();
         if (levels == null || levels.isEmpty()) {
@@ -4200,16 +3296,9 @@ public class SurroundGeometryEngine {
         return level.getElevation() > lowest + 1e-3f;
     }
 
-    /**
-     * Performs an exact 2D boolean area intersection test between two polygons using {@link java.awt.geom.Area}.
-     * Unlike SAT (which tests convex hulls), this handles non-convex, curved, or L-shaped geometries accurately.
-     *
-     * @return true if polygons share an overlapping area greater than 0.01 x 0.01 cm
-     */
+    /** Exact Area intersection for non-convex/curved polygons (thresholds overlap > 0.01 x 0.01 cm). */
     private static boolean polygonsOverlapExact(float[][] a, float[][] b) {
-        java.awt.geom.Rectangle2D boundsA = SurroundTarget.toPath(a).getBounds2D();
-        java.awt.geom.Rectangle2D boundsB = SurroundTarget.toPath(b).getBounds2D();
-        if (!boundsA.intersects(boundsB)) {
+        if (!SurroundTarget.toPath(a).getBounds2D().intersects(SurroundTarget.toPath(b).getBounds2D())) {
             return false;
         }
         Area overlap = new Area(SurroundTarget.toPath(a));
@@ -4221,18 +3310,13 @@ public class SurroundGeometryEngine {
         return bounds.getWidth() > 0.01 && bounds.getHeight() > 0.01;
     }
 
-    /**
-     * Calculates the peak wall height along the longitudinal portion of a wall where a polygon footprint extends.
-     * For sloping walls (walls with different start and end heights), projects the polygon vertices onto
-     * the wall's baseline segment to interpolate the maximum top elevation over that specific span.
-     */
+    /** Peak wall height over the portion of a (possibly sloping) wall spanned by polygon. */
     private float wallHeightAlong(Wall wall, float[][] polygon) {
         Float height = wall.getHeight();
         float h = height != null ? height : (home != null ? home.getWallHeight() : 250f);
         Float heightAtEnd = wall.getHeightAtEnd();
         if (heightAtEnd != null && Math.abs(heightAtEnd - h) > 1e-3f) {
-            double dx = wall.getXEnd() - wall.getXStart();
-            double dy = wall.getYEnd() - wall.getYStart();
+            double dx = wall.getXEnd() - wall.getXStart(), dy = wall.getYEnd() - wall.getYStart();
             double len2 = dx * dx + dy * dy;
             if (len2 > 1e-6) {
                 double tMin = 1, tMax = 0;
@@ -4251,66 +3335,26 @@ public class SurroundGeometryEngine {
         return h > 0 ? h : 250f;
     }
 
-    /**
-     * Checks if vertical elevation intervals {@code [z0, z1]} and {@code [pieceZ0, pieceZ0 + pieceH]}
-     * intersect within an effective vertical tolerance.
-     */
     private static boolean overlapsInHeight(float z0, float z1, HomePieceOfFurniture piece, float zTol) {
-        float pieceZ0 = piece.getElevation();
-        float pieceH = piece.getHeight();
+        float pieceZ0 = piece.getElevation(), pieceH = piece.getHeight();
         float effTol = Math.min(zTol, Math.min(z1 - z0, pieceH) * 0.45f);
         return z1 > pieceZ0 + effTol && z0 < pieceZ0 + pieceH - effTol;
     }
 
-    /**
-     * Whether a placed piece is on the side of the candidate or is a corner piece at one of its ends: with
-     * avoidNewlyGenerated, those don't block each other.
-     *
-     * @param candSide side of the candidate (-1 for a corner piece)
-     * @param candVert vertex of the candidate (-1 for a side piece)
-     */
+    /** True when placed belongs to the same side or an incident corner vertex (ignored by avoidNewlyGenerated). */
     private boolean isSameSideOrVertexEnd(Room candRoom, int candSide, int candVert, int candCount,
             HomePieceOfFurniture placed) {
-        Room placedRoom = pieceRooms.get(placed);
-        if (candRoom == null || placedRoom != candRoom || candCount <= 0) {
+        if (candRoom == null || pieceRooms.get(placed) != candRoom || candCount <= 0) {
             return false;
         }
-        Integer placedSideObj = pieceSideIndices.get(placed);
-        Integer placedVertObj = pieceVertexIndices.get(placed);
-        int placedSide = placedSideObj != null ? placedSideObj : -1;
-        int placedVert = placedVertObj != null ? placedVertObj : -1;
-
-        if (candSide >= 0) {
-            // Candidate is on side candSide (spans from vertex candSide to vertex (candSide + 1) % candCount)
-            if (placedSide == candSide) {
-                return true; // Same side (including extra end objects and stacked tiers of this side)
-            }
-            int vStart = candSide;
-            int vEnd = (candSide + 1) % candCount;
-            if (placedVert == vStart || placedVert == vEnd) {
-                return true; // Corner piece at the start or end vertex of this side
-            }
+        int placedSide = pieceSideIndices.getOrDefault(placed, -1);
+        int placedVert = pieceVertexIndices.getOrDefault(placed, -1);
+        if (candSide >= 0 && (placedSide == candSide || placedVert == candSide || placedVert == (candSide + 1) % candCount)) {
+            return true;
         }
-        if (candVert >= 0) {
-            // Candidate is a corner piece at vertex candVert
-            if (placedVert == candVert) {
-                return true; // Same vertex
-            }
-            int sPrev = (candVert - 1 + candCount) % candCount;
-            int sNext = candVert;
-            if (placedSide == sPrev || placedSide == sNext) {
-                return true; // Either of the two sides meeting at this vertex
-            }
-        }
-        return false;
+        return candVert >= 0 && (placedVert == candVert || placedSide == candVert || placedSide == (candVert - 1 + candCount) % candCount);
     }
 
-    /**
-     * Whether the candidate hits existing furniture (doors and windows are gaps instead), walls (as prisms of
-     * their height), nearby floors (avoidNearbyFloors, except rooms merged into the face) or objects placed on
-     * other sides (avoidNewlyGenerated).
-     */
-    /** Computes fast 2D axis-aligned bounding box [minX, minY, maxX, maxY] for a polygon. */
     private static float[] bbox(float[][] poly) {
         float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
         for (float[] p : poly) {
@@ -4322,111 +3366,88 @@ public class SurroundGeometryEngine {
         return new float[]{minX, minY, maxX, maxY};
     }
 
-    /** Fast AABB overlap check between two [minX, minY, maxX, maxY] bounding boxes. */
     private static boolean bboxOverlap(float[] a, float[] b) {
         return a[2] >= b[0] && a[0] <= b[2] && a[3] >= b[1] && a[1] <= b[3];
     }
 
-    /**
-     * Precomputes polygon vertices and AABBs for existing furniture, walls, and nearby floors
-     * on the active face's level so that per-piece collision checks avoid repeated allocations
-     * and costly Area constructions when thousands of small surrounding objects are placed.
-     */
     private void prepareCollisionCaches(Room face) {
         Level roomLevel = face != null ? face.getLevel() : null;
-        // 1. Existing furniture
+        List<HomePieceOfFurniture> exList = new ArrayList<>();
         List<float[][]> exP = new ArrayList<>();
         List<float[]> exB = new ArrayList<>();
         for (HomePieceOfFurniture existing : existingHomeFurniture) {
-            if (existing.isDoorOrWindow()) {
-                continue;
+            if (!existing.isDoorOrWindow() && (roomLevel == null || existing.getLevel() == null || existing.getLevel() == roomLevel)) {
+                float[][] pts = existing.getPoints();
+                exList.add(existing);
+                exP.add(pts);
+                exB.add(bbox(pts));
             }
-            if (roomLevel != null && existing.getLevel() != null && existing.getLevel() != roomLevel) {
-                continue;
-            }
-            float[][] pts = existing.getPoints();
-            exP.add(pts);
-            exB.add(bbox(pts));
         }
+        existingPieces = exList.toArray(new HomePieceOfFurniture[0]);
         existingPolys = exP.toArray(new float[0][][]);
         existingBounds = exB.toArray(new float[0][]);
 
-        // 2. Walls on level
         List<Wall> wList = new ArrayList<>();
         List<float[][]> wP = new ArrayList<>();
         List<float[]> wB = new ArrayList<>();
         if (home != null && home.getWalls() != null) {
             for (Wall wall : home.getWalls()) {
-                if (roomLevel != null && wall.getLevel() != null && !wall.isAtLevel(roomLevel)) {
-                    continue;
+                if (roomLevel == null || wall.getLevel() == null || wall.isAtLevel(roomLevel)) {
+                    float[][] pts = wall.getPoints();
+                    wList.add(wall);
+                    wP.add(pts);
+                    wB.add(bbox(pts));
                 }
-                float[][] pts = wall.getPoints();
-                wList.add(wall);
-                wP.add(pts);
-                wB.add(bbox(pts));
             }
         }
         activeWalls = wList.toArray(new Wall[0]);
         wallPolys = wP.toArray(new float[0][][]);
         wallBounds = wB.toArray(new float[0][]);
 
-        // 3. Nearby floors on level
         List<float[][]> fP = new ArrayList<>();
         List<float[]> fB = new ArrayList<>();
         List<Room> currentSourceRooms = face != null && activeConfig.faceSourceRooms != null
                 ? activeConfig.faceSourceRooms.get(face) : null;
         if (activeConfig.avoidNearbyFloors && currentSourceRooms != null && home != null && home.getRooms() != null) {
             for (Room otherRoom : home.getRooms()) {
-                if (otherRoom == face || currentSourceRooms.contains(otherRoom)) {
-                    continue;
+                if (otherRoom != face && !currentSourceRooms.contains(otherRoom)
+                        && (roomLevel == null || otherRoom.getLevel() == null || otherRoom.isAtLevel(roomLevel))) {
+                    float[][] pts = otherRoom.getPoints();
+                    fP.add(pts);
+                    fB.add(bbox(pts));
                 }
-                if (roomLevel != null && otherRoom.getLevel() != null && !otherRoom.isAtLevel(roomLevel)) {
-                    continue;
-                }
-                float[][] pts = otherRoom.getPoints();
-                fP.add(pts);
-                fB.add(bbox(pts));
             }
         }
         nearbyFloorPolys = fP.toArray(new float[0][][]);
         nearbyFloorBounds = fB.toArray(new float[0][]);
     }
 
+    /**
+     * Checks collisions against: (1) existing furniture (doors/windows are gaps), (2) level walls,
+     * (3) nearby unmerged floors (avoidNearbyFloors), and (4) pieces placed on other sides/rooms (avoidNewlyGenerated).
+     */
     private boolean hasCollision(HomePieceOfFurniture candidate) {
         checkCancelled();
-        float colTol = (float) effectiveCollisionFitTolerance();
-        // Shrink candidate footprint slightly by 0.5 cm default + 2 * colTol to prevent grazing boundary rejections
+        float colTol = (float) fitTolerance(activeConfig, false);
+        // Shrink slightly by 0.5 cm + 2*colTol to avoid rejecting pieces grazing a boundary
         float shrinkW = -Math.min(candidate.getWidth() * 0.8f, 0.5f + 2.0f * colTol);
         float shrinkD = -Math.min(candidate.getDepth() * 0.8f, 0.5f + 2.0f * colTol);
         float[][] candidatePoly = getScaledPolygon(candidate, shrinkW, shrinkD);
         float[] candBox = bbox(candidatePoly);
-        float candZ0 = candidate.getElevation();
-        float candZ1 = candZ0 + candidate.getHeight();
+        float candZ0 = candidate.getElevation(), candZ1 = candZ0 + candidate.getHeight();
         float zTol = 0.1f + colTol;
         Level roomLevel = (currentProcessingRoom != null) ? currentProcessingRoom.getLevel() : null;
 
-        // 1. Existing furniture/models of the home (using precomputed AABBs + SAT)
-        if (existingPolys != null) {
-            int idx = 0;
-            for (HomePieceOfFurniture existing : existingHomeFurniture) {
-                if (existing.isDoorOrWindow()) {
-                    continue;
-                }
-                if (roomLevel != null && existing.getLevel() != null && existing.getLevel() != roomLevel) {
-                    continue;
-                }
-                float[] eb = existingBounds[idx];
-                float[][] ep = existingPolys[idx++];
-                if (!bboxOverlap(candBox, eb) || !overlapsInHeight(candZ0, candZ1, existing, zTol)) {
-                    continue;
-                }
-                if (polygonsOverlapSAT(candidatePoly, ep)) {
+        if (existingPieces != null) {
+            for (int i = 0; i < existingPieces.length; i++) {
+                if (bboxOverlap(candBox, existingBounds[i])
+                        && overlapsInHeight(candZ0, candZ1, existingPieces[i], zTol)
+                        && polygonsOverlapSAT(candidatePoly, existingPolys[i])) {
                     return true;
                 }
             }
         }
 
-        // 2. Nearby walls (fast AABB rejection + SAT for 4-vertex straight walls, Area only for curved walls)
         if (activeWalls != null && activeWalls.length > 0) {
             float levelElevation = roomLevel != null ? roomLevel.getElevation() : 0;
             for (int i = 0; i < activeWalls.length; i++) {
@@ -4438,46 +3459,33 @@ public class SurroundGeometryEngine {
                 float wallBottom = wall.getLevel() != null && roomLevel != null ? wall.getLevel().getElevation() - levelElevation : 0;
                 float wallH = wallHeightAlong(wall, candidatePoly);
                 float effWallZTol = Math.min(zTol, Math.min(candZ1 - candZ0, wallH) * 0.45f);
-                if (candZ1 <= wallBottom + effWallZTol || candZ0 >= wallBottom + wallH - effWallZTol) {
-                    continue;
-                }
-                if (wp.length == 4 ? polygonsOverlapSAT(candidatePoly, wp) : polygonsOverlapExact(candidatePoly, wp)) {
+                if (candZ1 > wallBottom + effWallZTol && candZ0 < wallBottom + wallH - effWallZTol
+                        && (wp.length == 4 ? polygonsOverlapSAT(candidatePoly, wp) : polygonsOverlapExact(candidatePoly, wp))) {
                     return true;
                 }
             }
         }
 
-        // 3. Nearby floors when avoidNearbyFloors is enabled
         if (nearbyFloorPolys != null && nearbyFloorPolys.length > 0) {
             for (int i = 0; i < nearbyFloorPolys.length; i++) {
-                if (!bboxOverlap(candBox, nearbyFloorBounds[i])) {
-                    continue;
-                }
-                if (polygonsOverlapExact(candidatePoly, nearbyFloorPolys[i])) {
+                if (bboxOverlap(candBox, nearbyFloorBounds[i]) && polygonsOverlapExact(candidatePoly, nearbyFloorPolys[i])) {
                     return true;
                 }
             }
         }
 
-        // 4. Newly generated objects during this surround operation, ONLY from OTHER sides or OTHER rooms
         if (activeConfig.avoidNewlyGenerated) {
-            Room candRoom = pieceRooms.containsKey(candidate) ? pieceRooms.get(candidate) : currentProcessingRoom;
-            int candSide = pieceSideIndices.containsKey(candidate) ? pieceSideIndices.get(candidate) : currentSideIndex;
-            int candVert = pieceVertexIndices.containsKey(candidate) ? pieceVertexIndices.get(candidate) : currentVertexIndex;
-            int candCount = pieceRoomSideCounts.containsKey(candidate) ? pieceRoomSideCounts.get(candidate) : currentRoomSideCount;
-
+            Room candRoom = pieceRooms.getOrDefault(candidate, currentProcessingRoom);
+            int candSide = pieceSideIndices.getOrDefault(candidate, currentSideIndex);
+            int candVert = pieceVertexIndices.getOrDefault(candidate, currentVertexIndex);
+            int candCount = pieceRoomSideCounts.getOrDefault(candidate, currentRoomSideCount);
             for (HomePieceOfFurniture placed : newlyPlacedFurniture) {
-                if (isSameSideOrVertexEnd(candRoom, candSide, candVert, candCount, placed)) {
+                if (isSameSideOrVertexEnd(candRoom, candSide, candVert, candCount, placed)
+                        || !overlapsInHeight(candZ0, candZ1, placed, zTol)) {
                     continue;
                 }
-                if (!overlapsInHeight(candZ0, candZ1, placed, zTol)) {
-                    continue;
-                }
-                // Quick center-distance filter before polygon scaling and SAT
-                float dx = Math.abs(candidate.getX() - placed.getX());
-                float dy = Math.abs(candidate.getY() - placed.getY());
                 float maxSpan = (candidate.getWidth() + candidate.getDepth() + placed.getWidth() + placed.getDepth()) * 0.6f;
-                if (dx > maxSpan || dy > maxSpan) {
+                if (Math.abs(candidate.getX() - placed.getX()) > maxSpan || Math.abs(candidate.getY() - placed.getY()) > maxSpan) {
                     continue;
                 }
                 if (polygonsOverlapSAT(candidatePoly, getScaledPolygon(placed, -0.5f, -0.5f))) {
@@ -4488,10 +3496,7 @@ public class SurroundGeometryEngine {
         return false;
     }
 
-    /**
-     * The footprint of the piece grown (positive) or shrunk (negative) by those amounts along its own axes,
-     * half on each side; taken from its points, so it works for non-resizable pieces too.
-     */
+    /** Piece footprint grown/shrunk along its own axes (computed from vertices so it works for non-resizable pieces). */
     private static float[][] getScaledPolygon(HomePieceOfFurniture piece, float deltaWidth, float deltaDepth) {
         float[][] points = piece.getPoints();
         if (points.length != 4) {
@@ -4502,8 +3507,8 @@ public class SurroundGeometryEngine {
             cx += point[0] / 4.0;
             cy += point[1] / 4.0;
         }
-        double ux = points[1][0] - points[0][0], uy = points[1][1] - points[0][1];   // along the width
-        double vx = points[2][0] - points[1][0], vy = points[2][1] - points[1][1];   // along the depth
+        double ux = points[1][0] - points[0][0], uy = points[1][1] - points[0][1];
+        double vx = points[2][0] - points[1][0], vy = points[2][1] - points[1][1];
         double lu = Math.hypot(ux, uy), lv = Math.hypot(vx, vy);
         if (lu < 1e-6 || lv < 1e-6) {
             return points;
@@ -4524,16 +3529,10 @@ public class SurroundGeometryEngine {
         return scaled;
     }
 
-    /**
-     * Evaluates 2D polygon intersection between two convex polygons using the Separating Axis Theorem (SAT).
-     *
-     * @return true if polygons intersect
-     */
     private static boolean polygonsOverlapSAT(float[][] polyA, float[][] polyB) {
         return !hasSeparatingAxis(polyA, polyB) && !hasSeparatingAxis(polyB, polyA);
     }
 
-    /** Checks if a separating axis exists when projecting both polygons onto the edge normals of {@code polyA}. */
     private static boolean hasSeparatingAxis(float[][] polyA, float[][] polyB) {
         int n = polyA.length;
         for (int i = 0; i < n; i++) {
@@ -4559,50 +3558,27 @@ public class SurroundGeometryEngine {
                 maxB = Math.max(maxB, proj);
             }
             if (maxA < minB || maxB < minA) {
-                return true; // Separating axis found
+                return true;
             }
         }
         return false;
     }
 
-    /**
-     * Computes the effective surrounding width and depth of a piece based on its orientation angle.
-     * For orthogonal angles (0, 90, 180, 270 degrees), returns exact model dimensions or transposed dimensions.
-     * For arbitrary oblique angles, computes the bounding box encompassing all 4 rotated footprint vertices.
-     *
-     * @return 2-element array {@code [effectiveWidth, effectiveDepth]}
-     */
     double[] getPieceSurroundingDimensions(HomePieceOfFurniture piece) {
-        double sWidth, sDepth;
-        float pieceAngle = (float) Math.toDegrees(piece.getAngle());
-        pieceAngle = ((pieceAngle % 360f) + 360f) % 360f;
+        float pieceAngle = (((float) Math.toDegrees(piece.getAngle()) % 360f) + 360f) % 360f;
         if (Math.abs(pieceAngle) < 1e-3 || Math.abs(pieceAngle - 180f) < 1e-3 || Math.abs(pieceAngle - 360f) < 1e-3) {
-            sWidth = piece.getWidth();
-            sDepth = piece.getDepth();
-        } else if (Math.abs(pieceAngle - 90f) < 1e-3 || Math.abs(pieceAngle - 270f) < 1e-3) {
-            sWidth = piece.getDepth();
-            sDepth = piece.getWidth();
-        } else {
-            // Turned by any other angle: size of the bounding box around its points
-            float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
-            for (float[] point : piece.getPoints()) {
-                minX = Math.min(minX, point[0]);
-                maxX = Math.max(maxX, point[0]);
-                minY = Math.min(minY, point[1]);
-                maxY = Math.max(maxY, point[1]);
-            }
-            sWidth = maxX - minX;
-            sDepth = maxY - minY;
+            return new double[]{piece.getWidth(), piece.getDepth()};
         }
-        return new double[]{sWidth, sDepth};
+        if (Math.abs(pieceAngle - 90f) < 1e-3 || Math.abs(pieceAngle - 270f) < 1e-3) {
+            return new double[]{piece.getDepth(), piece.getWidth()};
+        }
+        float[] b = bbox(piece.getPoints());
+        return new double[]{b[2] - b[0], b[3] - b[1]};
     }
 
     /**
-     * When 2 or more objects are selected, groups them into a single {@link HomeFurnitureGroup} so the
-     * group is used as a unified surround template. If all objects share the same (x, y) position (e.g.
-     * picked fresh from the catalog), arranges them side-by-side along the X-axis before grouping.
-     *
-     * @return unified template piece or group
+     * Groups 2+ selected pieces into a single template group; if all are unplaced (e.g. fresh from catalog),
+     * arranges them side-by-side along X first.
      */
     public static HomePieceOfFurniture asSingleTemplate(List<HomePieceOfFurniture> pieces) {
         if (pieces == null || pieces.isEmpty()) {
@@ -4632,20 +3608,9 @@ public class SurroundGeometryEngine {
                 curX += c.getWidth();
             }
         }
-        String name = clones.get(0).getName() + " (" + clones.size() + ")";
-        return new HomeFurnitureGroup(clones, name);
+        return new HomeFurnitureGroup(clones, clones.get(0).getName() + " (" + clones.size() + ")");
     }
 
-    /** Returns the primary template piece used for generating surrounding furniture. */
-    private HomePieceOfFurniture getNextSelectedPiece() {
-        return primaryTemplate;
-    }
-
-    /**
-     * Recursively traverses and collects all leaf furniture pieces contained within a piece or group hierarchy.
-     *
-     * @param piece     source piece or group
-     */
     public static void collectTemplatePieces(HomePieceOfFurniture piece, Set<HomePieceOfFurniture> targetSet) {
         targetSet.add(piece);
         if (piece instanceof HomeFurnitureGroup) {
@@ -4655,15 +3620,8 @@ public class SurroundGeometryEngine {
         }
     }
 
-    /**
-     * Computes a random scaling factor sampled uniformly between {@code minPercent}% and {@code maxPercent}%.
-     *
-     * @param minPercent minimum percentage (e.g. 80 for 0.8x)
-     * @param maxPercent maximum percentage (e.g. 120 for 1.2x)
-     */
     private double getRandomScale(double minPercent, double maxPercent) {
         double min = minPercent / 100.0;
-        double max = maxPercent / 100.0;
-        return min + Math.random() * (max - min);
+        return min + Math.random() * (maxPercent / 100.0 - min);
     }
 }

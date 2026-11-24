@@ -20,153 +20,75 @@ import javax.swing.SpinnerNumberModel;
 /**
  * Same size around the outline (types 3 and 4: one size for all objects so each stretch is covered; 3 only
  * enlarges, 4 only reduces; with limits and a fallback: adjust, center or leave empty) or same spaces (types
- * 1 and 2: equal spaces between objects or at the ends, within a maximum difference). Sub-controls show
- * when their option is checked.
+ * 1 and 2: equal spaces between objects or at the ends, within a maximum difference).
  */
 class UniformPanel extends JPanel {
 
-    /** Container section for uniform sizing options (Types 3 and 4). */
-    final JPanel sizeSection;
+    final JPanel sizeSection, gapsSection;
+    final JCheckBox sameSizeCheckBox, sameGapsCheckBox;
+    private final JPanel sizeOptions, gapsOptions;
+    final JSpinner maxSizeChangeSpinner, maxSizeDifferenceSpinner, maxJointSpinner, maxGapDifferenceSpinner;
+    final JRadioButton adjustRadio, centerRadio, emptyRadio;
 
-    /** Checkbox toggling uniform dimensions across the whole outline. */
-    final JCheckBox sameSizeCheckBox;
-
-    /** Nested sub-panel containing limit spinners and fallback radio buttons. */
-    private final JPanel sizeOptions;
-
-    /** Spinner for maximum permissible percentage change in piece width relative to original. */
-    final JSpinner maxSizeChangeSpinner;
-
-    /** Spinner for maximum allowed percentage difference between the largest and smallest pieces across stretches. */
-    final JSpinner maxSizeDifferenceSpinner;
-
-    /** Spinner for maximum acceptable joint overlap/gap shared between pieces (in cm). */
-    final JSpinner maxJointSpinner;
-
-    /** Fallback option: slightly adjust piece width on non-compliant stretches to avoid gaps. */
-    final JRadioButton adjustRadio;
-
-    /** Fallback option: keep the uniform piece width centered on non-compliant stretches, leaving end gaps. */
-    final JRadioButton centerRadio;
-
-    /** Fallback option: leave non-compliant stretches empty. */
-    final JRadioButton emptyRadio;
-
-    /** Container section for uniform gap options (Types 1 and 2). */
-    final JPanel gapsSection;
-
-    /** Checkbox toggling uniform spacing around the whole outline. */
-    final JCheckBox sameGapsCheckBox;
-
-    /** Nested sub-panel containing gap limit spinners. */
-    private final JPanel gapsOptions;
-
-    /** Spinner for maximum difference between the widest and narrowest gap across the outline (in cm). */
-    final JSpinner maxGapDifferenceSpinner;
-
-    /**
-     * Constructs a UniformPanel with all controls and event listeners.
-     *
-     * @param onChanged callback executed whenever any uniform setting is toggled or modified
-     */
     UniformPanel(UiKit.Texts t, Runnable onChanged) {
         super(new GridBagLayout());
 
-        // ---- Types 3 and 4: Uniform size section ----
         sizeSection = new JPanel(new GridBagLayout());
-        int row = 0;
         sameSizeCheckBox = new JCheckBox(t.get("uniformSize", "Same dimensions around the whole outline:"), false);
-        UiKit.addOptionRow(sizeSection, row++, 0, sameSizeCheckBox);
+        UiKit.addOptionRow(sizeSection, 0, 0, sameSizeCheckBox);
 
         sizeOptions = new JPanel(new GridBagLayout());
         int sr = 0;
         UiKit.addOptionRow(sizeOptions, sr++, 0, UiKit.subtitle(t.get("uniformLimits", "Limits")));
-
-        // Limit: Max % size change
         maxSizeChangeSpinner = UiKit.spinner(new SpinnerNumberModel(20.0, 1.0, 90.0, 1.0), 4);
         UiKit.addOptionRow(sizeOptions, sr++, 1,
-                new JLabel(t.get("uniformMaxSizeChange", "Max. size change:")),
-                maxSizeChangeSpinner, new JLabel("%"));
-
-        // Limit: Max % difference between stretches
+                new JLabel(t.get("uniformMaxSizeChange", "Max. size change:")), maxSizeChangeSpinner, new JLabel("%"));
         maxSizeDifferenceSpinner = UiKit.spinner(new SpinnerNumberModel(1.0, 0.0, 20.0, 0.1), 4);
         UiKit.addOptionRow(sizeOptions, sr++, 1,
                 new JLabel(t.get("uniformMaxSideDifference", "Max. difference between largest and smallest object:")),
                 maxSizeDifferenceSpinner, new JLabel("%"));
-
-        // Limit: Max joint between objects
         maxJointSpinner = UiKit.spinner(new SpinnerNumberModel(0.2, 0.0, 5.0, 0.05), 4);
         UiKit.addOptionRow(sizeOptions, sr++, 1,
-                new JLabel(t.get("uniformMaxJoint", "Max. spacing (joint) between objects:")),
-                maxJointSpinner, new JLabel("cm"));
+                new JLabel(t.get("uniformMaxJoint", "Max. spacing (joint) between objects:")), maxJointSpinner, new JLabel("cm"));
 
-        // Fallback options
         UiKit.addOptionRow(sizeOptions, sr++, 0,
                 UiKit.subtitle(t.get("uniformFallback", "If a stretch exceeds the limits:")));
         adjustRadio = new JRadioButton(t.get("uniformAdjust", "Adjust size as little as needed (no gaps)"), true);
         centerRadio = new JRadioButton(t.get("uniformCenter", "Keep common size centered"));
         emptyRadio = new JRadioButton(t.get("uniformEmpty", "Leave empty"));
         ButtonGroup group = new ButtonGroup();
-        group.add(adjustRadio);
-        group.add(centerRadio);
-        group.add(emptyRadio);
-        UiKit.addOptionRow(sizeOptions, sr++, 1, adjustRadio);
-        UiKit.addOptionRow(sizeOptions, sr++, 1, centerRadio);
-        UiKit.addOptionRow(sizeOptions, sr++, 1, emptyRadio);
-        UiKit.addOptionRow(sizeSection, row++, 1, sizeOptions);
+        for (JRadioButton r : new JRadioButton[]{adjustRadio, centerRadio, emptyRadio}) {
+            group.add(r);
+            UiKit.addOptionRow(sizeOptions, sr++, 1, r);
+            r.addActionListener(e -> onChanged.run());
+        }
+        UiKit.addOptionRow(sizeSection, 1, 1, sizeOptions);
 
-        // ---- Types 1 and 2: Uniform gaps section ----
         gapsSection = new JPanel(new GridBagLayout());
-        row = 0;
         sameGapsCheckBox = new JCheckBox(t.get("uniformGaps", "Same spaces around the whole outline:"), false);
-        UiKit.addOptionRow(gapsSection, row++, 0, sameGapsCheckBox);
-
+        UiKit.addOptionRow(gapsSection, 0, 0, sameGapsCheckBox);
         gapsOptions = new JPanel(new GridBagLayout());
         maxGapDifferenceSpinner = UiKit.spinner(new SpinnerNumberModel(1.0, 0.0, 100.0, 0.1), 4);
         UiKit.addOptionRow(gapsOptions, 0, 1,
-                new JLabel(t.get("uniformMaxGapDifference", "Max. space difference:")),
-                maxGapDifferenceSpinner, new JLabel("cm"));
-        UiKit.addOptionRow(gapsSection, row++, 1, gapsOptions);
+                new JLabel(t.get("uniformMaxGapDifference", "Max. space difference:")), maxGapDifferenceSpinner, new JLabel("cm"));
+        UiKit.addOptionRow(gapsSection, 1, 1, gapsOptions);
 
-        // Assemble into main panel
-        add(sizeSection, constraints(0));
-        add(gapsSection, constraints(1));
+        UiKit.addOptionRow(this, 0, 0, sizeSection);
+        UiKit.addOptionRow(this, 1, 0, gapsSection);
         UiKit.addFiller(this);
 
-        // Wire listener callbacks
-        sameSizeCheckBox.addActionListener(e -> {
-            updateVisibility();
-            onChanged.run();
-        });
-        sameGapsCheckBox.addActionListener(e -> {
-            updateVisibility();
-            onChanged.run();
-        });
-        for (JRadioButton r : new JRadioButton[]{adjustRadio, centerRadio, emptyRadio}) {
-            r.addActionListener(e -> onChanged.run());
+        for (JCheckBox cb : new JCheckBox[]{sameSizeCheckBox, sameGapsCheckBox}) {
+            cb.addActionListener(e -> {
+                updateVisibility();
+                onChanged.run();
+            });
         }
         for (JSpinner sp : new JSpinner[]{maxSizeChangeSpinner, maxSizeDifferenceSpinner, maxJointSpinner, maxGapDifferenceSpinner}) {
             sp.addChangeListener(e -> onChanged.run());
         }
-
         updateVisibility();
     }
 
-    /** Builds GridBagConstraints anchored to the start of the row. */
-    private static java.awt.GridBagConstraints constraints(int row) {
-        java.awt.GridBagConstraints c = new java.awt.GridBagConstraints();
-        c.gridx = 0;
-        c.gridy = row;
-        c.anchor = java.awt.GridBagConstraints.LINE_START;
-        return c;
-    }
-
-    /**
-     * Controls visibility of the size and gap sections based on the currently active surrounding type.
-     *
-     * @param size whether to show the uniform size section (Types 3 &amp; 4)
-     * @param gaps whether to show the uniform gaps section (Types 1 &amp; 2)
-     */
     void showParts(boolean size, boolean gaps) {
         sizeSection.setVisible(size);
         gapsSection.setVisible(gaps);
@@ -174,7 +96,6 @@ class UniformPanel extends JPanel {
         repaint();
     }
 
-    /** Updates visibility of nested sub-options based on whether their master checkboxes are checked. */
     private void updateVisibility() {
         sizeOptions.setVisible(sameSizeCheckBox.isSelected());
         gapsOptions.setVisible(sameGapsCheckBox.isSelected());
@@ -182,34 +103,14 @@ class UniformPanel extends JPanel {
         repaint();
     }
 
-    /** Populates the given {@link SurroundConfig} with values from the UI controls. */
     void fill(SurroundConfig cfg) {
         cfg.uniformSize = sizeSection.isVisible() && sameSizeCheckBox.isSelected();
         cfg.uniformMaxSizeChange = ((Number) maxSizeChangeSpinner.getValue()).doubleValue();
         cfg.uniformMaxSizeDifference = ((Number) maxSizeDifferenceSpinner.getValue()).doubleValue();
         cfg.uniformMaxJoint = ((Number) maxJointSpinner.getValue()).doubleValue();
         cfg.uniformFallback = centerRadio.isSelected() ? SurroundConfig.UNIFORM_CENTER
-                : emptyRadio.isSelected() ? SurroundConfig.UNIFORM_EMPTY
-                : SurroundConfig.UNIFORM_ADJUST;
+                : emptyRadio.isSelected() ? SurroundConfig.UNIFORM_EMPTY : SurroundConfig.UNIFORM_ADJUST;
         cfg.uniformGaps = gapsSection.isVisible() && sameGapsCheckBox.isSelected();
         cfg.uniformMaxGapDifference = ((Number) maxGapDifferenceSpinner.getValue()).doubleValue();
-    }
-
-    /** Loads UI control states from the given {@link SurroundConfig}. */
-    void load(SurroundConfig cfg) {
-        sameSizeCheckBox.setSelected(cfg.uniformSize);
-        maxSizeChangeSpinner.setValue(cfg.uniformMaxSizeChange);
-        maxSizeDifferenceSpinner.setValue(cfg.uniformMaxSizeDifference);
-        maxJointSpinner.setValue(cfg.uniformMaxJoint);
-        if (cfg.uniformFallback == SurroundConfig.UNIFORM_CENTER) {
-            centerRadio.setSelected(true);
-        } else if (cfg.uniformFallback == SurroundConfig.UNIFORM_EMPTY) {
-            emptyRadio.setSelected(true);
-        } else {
-            adjustRadio.setSelected(true);
-        }
-        sameGapsCheckBox.setSelected(cfg.uniformGaps);
-        maxGapDifferenceSpinner.setValue(cfg.uniformMaxGapDifference);
-        updateVisibility();
     }
 }

@@ -187,10 +187,6 @@ class OptionsPanel extends JPanel {
         UiKit.addOptionRow(this, row++, 1, avoidCollisionsCheckBox);
         avoidCollisionsSubPanel = new JPanel(new GridBagLayout());
         int acr = 0;
-        avoidNearbyFloorsCheckBox = new JCheckBox(t.get("avoidNearbyFloors", "Also avoid collisions with other nearby floors"), false);
-        if (hasFloors) {
-            UiKit.addOptionRow(avoidCollisionsSubPanel, acr++, 2, avoidNearbyFloorsCheckBox);
-        }
         avoidNewlyGeneratedCheckBox = new JCheckBox(t.get("avoidNewlyGenerated", "Include the objects being placed (other sides and rooms)"), false);
         UiKit.addOptionRow(avoidCollisionsSubPanel, acr++, 2, avoidNewlyGeneratedCheckBox);
         enableCollisionFitToleranceCheckBox = new JCheckBox(t.get("enableCollisionFitTolerance", "Allow overlap if it does not fit:"), false);
@@ -199,6 +195,10 @@ class OptionsPanel extends JPanel {
         collisionFitToleranceSubRow = UiKit.addOptionRow(avoidCollisionsSubPanel, acr++, 3,
                 new JLabel(t.get("fitToleranceValue", "Max.:")), collisionFitToleranceSpinner, new JLabel("cm"));
         addSubPanel(avoidCollisionsSubPanel, row++);
+        avoidNearbyFloorsCheckBox = new JCheckBox(t.get("avoidNearbyFloors", "Avoid collisions with other nearby floors"), false);
+        if (hasFloors) {
+            UiKit.addOptionRow(this, row++, 1, avoidNearbyFloorsCheckBox);
+        }
 
         upperLevelHolesSection = new JPanel(new GridBagLayout());
         UiKit.addOptionRow(upperLevelHolesSection, 0, 1, new JLabel(t.get("upperLevelHolesTitle", "Floor openings (upper levels):")));
@@ -551,7 +551,7 @@ class OptionsPanel extends JPanel {
         cfg.gapFitTolerance = cfg.enableGapFitTolerance ? spinnerDouble(gapFitToleranceSpinner) : 0.0;
         cfg.shortSidesOneObject = shortSidesCheckBox.isSelected();
         cfg.avoidCollisions = avoidCollisionsCheckBox.isSelected();
-        cfg.avoidNearbyFloors = cfg.avoidCollisions && hasFloors && avoidNearbyFloorsCheckBox.isSelected();
+        cfg.avoidNearbyFloors = hasFloors && avoidNearbyFloorsCheckBox.isSelected();
         cfg.avoidNewlyGenerated = cfg.avoidCollisions && avoidNewlyGeneratedCheckBox.isSelected();
         cfg.enableCollisionFitTolerance = cfg.avoidCollisions && supportsFitTolerance && enableCollisionFitToleranceCheckBox.isSelected();
         cfg.collisionFitTolerance = cfg.enableCollisionFitTolerance ? spinnerDouble(collisionFitToleranceSpinner) : 0.0;

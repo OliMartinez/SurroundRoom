@@ -1526,7 +1526,7 @@ public class SurroundGeometryEngine {
             if (!fitsInFreeStretch) {
                 return;
             }
-            ignoreCollisions = !activeConfig.avoidCollisions;
+            ignoreCollisions = !checksCollisions();
             if (activeConfig.extraObjectRespectCorners && sides.size() > 1
                     && getsIntoFigure(sides, vertex, straightFootprint(side, center, d[1], d[0] / 2.0, d[1] / 2.0))) {
                 return;
@@ -1904,7 +1904,7 @@ public class SurroundGeometryEngine {
 
     private void placeCentered(SidePath side, double s) {
         double[] dims = getPieceSurroundingDimensions(primaryTemplate);
-        place(side, s, dims[1], primaryTemplate, -1, -1, -1, true, !activeConfig.avoidCollisions);
+        place(side, s, dims[1], primaryTemplate, -1, -1, -1, true, !checksCollisions());
     }
 
     private double currentWallNormalX = 0.0;
@@ -2267,7 +2267,7 @@ public class SurroundGeometryEngine {
                 }
             }
         }
-        if (!activeConfig.avoidCollisions) {
+        if (!checksCollisions()) {
             return false;
         }
         HomePieceOfFurniture posed = piece.clone();
@@ -3146,7 +3146,7 @@ public class SurroundGeometryEngine {
                 pieceSideIndices.put(stackedCopy, pieceSideIndices.get(basePiece));
                 pieceVertexIndices.put(stackedCopy, pieceVertexIndices.get(basePiece));
                 pieceRoomSideCounts.put(stackedCopy, pieceRoomSideCounts.get(basePiece));
-                if (config.avoidCollisions && hasCollision(stackedCopy)) {
+                if (checksCollisions() && hasCollision(stackedCopy)) {
                     continue;
                 }
                 boolean isCorner = cornerBasePieces.contains(basePiece);
@@ -3200,7 +3200,7 @@ public class SurroundGeometryEngine {
         fCopy.setAngle(pieceAngle + angle);
 
         if (isBlockedByUpperLevelFloorHole(fCopy)
-                || (activeConfig.avoidCollisions && !ignoreCollisions && hasCollision(fCopy))) {
+                || (checksCollisions() && !ignoreCollisions && hasCollision(fCopy))) {
             return;
         }
 
@@ -3422,6 +3422,11 @@ public class SurroundGeometryEngine {
         nearbyFloorBounds = fB.toArray(new float[0][]);
     }
 
+    /** Whether the placed objects are checked for collisions: with furniture and walls, or with nearby floors. */
+    private boolean checksCollisions() {
+        return activeConfig.avoidCollisions || activeConfig.avoidNearbyFloors;
+    }
+
     /**
      * Checks collisions against: (1) existing furniture (doors/windows are gaps), (2) level walls,
      * (3) nearby unmerged floors (avoidNearbyFloors), and (4) pieces placed on other sides/rooms (avoidNewlyGenerated).
@@ -3438,7 +3443,7 @@ public class SurroundGeometryEngine {
         float zTol = 0.1f + colTol;
         Level roomLevel = (currentProcessingRoom != null) ? currentProcessingRoom.getLevel() : null;
 
-        if (existingPieces != null) {
+        if (activeConfig.avoidCollisions && existingPieces != null) {
             for (int i = 0; i < existingPieces.length; i++) {
                 if (bboxOverlap(candBox, existingBounds[i])
                         && overlapsInHeight(candZ0, candZ1, existingPieces[i], zTol)
@@ -3448,7 +3453,7 @@ public class SurroundGeometryEngine {
             }
         }
 
-        if (activeWalls != null && activeWalls.length > 0) {
+        if (activeConfig.avoidCollisions && activeWalls != null && activeWalls.length > 0) {
             float levelElevation = roomLevel != null ? roomLevel.getElevation() : 0;
             for (int i = 0; i < activeWalls.length; i++) {
                 if (!bboxOverlap(candBox, wallBounds[i])) {
@@ -3474,7 +3479,7 @@ public class SurroundGeometryEngine {
             }
         }
 
-        if (activeConfig.avoidNewlyGenerated) {
+        if (activeConfig.avoidCollisions && activeConfig.avoidNewlyGenerated) {
             Room candRoom = pieceRooms.getOrDefault(candidate, currentProcessingRoom);
             int candSide = pieceSideIndices.getOrDefault(candidate, currentSideIndex);
             int candVert = pieceVertexIndices.getOrDefault(candidate, currentVertexIndex);

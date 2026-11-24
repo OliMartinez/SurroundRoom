@@ -9,9 +9,9 @@ SurroundRoom is a plug-in for [Sweet Home 3D](https://www.sweethome3d.com) that 
 - Surrounds floors, walls or both, inside or outside.
 - 7 distribution types, from evenly spaced objects to a fixed number along the whole outline.
 - Live plan preview with zoom and pan.
-- Choose the sides to surround and exclude stretches by clicking on the plan.
-- Respects door and window openings and avoids collisions with furniture, walls and nearby floors.
-- Corner handling: empty corners, a perpendicular piece or another catalog piece in each corner.
+- Exclude rooms, sides and stretches from tabs above the preview: click them on the drawing, or drag along a side to exclude a stretch and adjust its ends.
+- Respects door openings and, optionally, window openings, and avoids collisions with furniture, walls and nearby floors.
+- Corner handling: empty corners, a perpendicular piece or another object (picked in the plan, the furniture list or the catalog) in each corner.
 - Start and end of each side: at the vertex, shifted, fitted to the other strip or with an extra object.
 - Same dimensions or same spaces around the whole outline, with limits.
 - Vertical stacking, grouping of the generated models, and random or gradual properties (size, elevation, angle, color/texture per material, light power...).

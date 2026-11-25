@@ -21,7 +21,7 @@ SurroundRoom is a plug-in for [Sweet Home 3D](https://www.sweethome3d.com) that 
 
 ## Download and installation
 
-Download `SurroundRoom-2.sh3p` from the [Releases](https://github.com/OliMartinez/SurroundRoom/releases) page or from the [SourceForge ticket](https://sourceforge.net/p/sweethome3d/plug-ins/51/). Double-click it with Sweet Home 3D installed, or copy it into the Sweet Home 3D plug-ins folder and restart the application. Remove older SurroundRoom versions from that folder first.
+Download `SurroundRoom-2.sh3p` from the [SourceForge ticket](https://sourceforge.net/p/sweethome3d/plug-ins/51/). Double-click it with Sweet Home 3D installed, or copy it into the Sweet Home 3D plug-ins folder and restart the application. Remove older SurroundRoom versions from that folder first.
 
 Requirements: Sweet Home 3D 6.5 or later and Java 8 or later.
 

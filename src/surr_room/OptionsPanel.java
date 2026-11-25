@@ -92,16 +92,16 @@ class OptionsPanel extends JPanel {
     final JCheckBox extraObjectRespectObstaclesCheckBox, extraObjectRespectCornersCheckBox;
 
     private final UiKit.Texts texts;
-    private final boolean hasFloors, hasUpperLevel;
+    private final boolean hasTargets, hasUpperLevel;
     private int currentType = 1;
     private boolean uniformSizeActive;
     private boolean dimModeChosenByUser;
 
-    OptionsPanel(UiKit.Texts t, UserPreferences userPreferences, boolean hasTargets, boolean hasFloors,
+    OptionsPanel(UiKit.Texts t, UserPreferences userPreferences, boolean hasTargets,
             boolean hasUpperLevel, Runnable onCornerChanged) {
         super(new GridBagLayout());
         this.texts = t;
-        this.hasFloors = hasFloors;
+        this.hasTargets = hasTargets;
         this.hasUpperLevel = hasUpperLevel;
         int row = 0;
 
@@ -196,7 +196,7 @@ class OptionsPanel extends JPanel {
                 new JLabel(t.get("fitToleranceValue", "Max.:")), collisionFitToleranceSpinner, new JLabel("cm"));
         addSubPanel(avoidCollisionsSubPanel, row++);
         avoidNearbyFloorsCheckBox = new JCheckBox(t.get("avoidNearbyFloors", "Avoid collisions with other nearby floors"), false);
-        if (hasFloors) {
+        if (hasTargets) {
             UiKit.addOptionRow(this, row++, 1, avoidNearbyFloorsCheckBox);
         }
 
@@ -551,7 +551,7 @@ class OptionsPanel extends JPanel {
         cfg.gapFitTolerance = cfg.enableGapFitTolerance ? spinnerDouble(gapFitToleranceSpinner) : 0.0;
         cfg.shortSidesOneObject = shortSidesCheckBox.isSelected();
         cfg.avoidCollisions = avoidCollisionsCheckBox.isSelected();
-        cfg.avoidNearbyFloors = hasFloors && avoidNearbyFloorsCheckBox.isSelected();
+        cfg.avoidNearbyFloors = hasTargets && avoidNearbyFloorsCheckBox.isSelected();
         cfg.avoidNewlyGenerated = cfg.avoidCollisions && avoidNewlyGeneratedCheckBox.isSelected();
         cfg.enableCollisionFitTolerance = cfg.avoidCollisions && supportsFitTolerance && enableCollisionFitToleranceCheckBox.isSelected();
         cfg.collisionFitTolerance = cfg.enableCollisionFitTolerance ? spinnerDouble(collisionFitToleranceSpinner) : 0.0;

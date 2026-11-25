@@ -52,6 +52,7 @@ public class SurroundTarget {
     /** Per-face cache indexed by (mergeCollinear, interior): 0..3 overlap lists, 4..7 interior-wall side masks. */
     private final Map<Room, Object[]> faceCache = new HashMap<>();
     private List<Room> sourceRooms = Collections.emptyList();
+    private List<Room> enclosedRooms;
 
     private SurroundTarget(int kind, int number, Room room, Room outerFace, List<Room> innerFaces, boolean closed) {
         this.kind = kind;
@@ -78,6 +79,33 @@ public class SurroundTarget {
     public int getNumber() { return number; }
     public Room getRoom() { return room; }
     public List<Room> getSourceRooms() { return sourceRooms; }
+
+    /** Floors of the same level lying inside this set of walls (at least half of their area within its outline). */
+    public List<Room> getEnclosedRooms(List<Room> homeRooms) {
+        if (enclosedRooms == null) {
+            enclosedRooms = new ArrayList<>();
+            if (kind == WALLS && outerFace != null && homeRooms != null) {
+                Area outline = new Area(toPath(outerFace.getPoints()));
+                for (Room candidate : homeRooms) {
+                    if (outerFace.getLevel() != null && candidate.getLevel() != null
+                            && !candidate.isAtLevel(outerFace.getLevel())) {
+                        continue;
+                    }
+                    float[][] points = candidate.getPoints();
+                    double area = Math.abs(signedArea(points));
+                    if (area <= 0) {
+                        continue;
+                    }
+                    Area inside = new Area(toPath(points));
+                    inside.intersect(outline);
+                    if (areaOf(inside) >= 0.5 * area) {
+                        enclosedRooms.add(candidate);
+                    }
+                }
+            }
+        }
+        return enclosedRooms;
+    }
     public List<Wall> getWalls() { return walls; }
     public boolean isClosed() { return closed; }
 

@@ -138,12 +138,11 @@ public class SurroundConfigFrame extends JFrame {
         this.loadingBadgeTimer = new Timer(180, e -> outlinePreview.setLoading(true, texts.get("previewLoading", "Cargando\u2026")));
         this.loadingBadgeTimer.setRepeats(false);
 
-        boolean openWalls = false, floors = false;
+        boolean openWalls = false;
         List<Room> rawRooms = new ArrayList<>();
         List<Wall> rawWalls = new ArrayList<>();
         for (SurroundTarget target : this.targets) {
             if (target.getKind() == SurroundTarget.ROOM) {
-                floors = true;
                 rawRooms.add(target.getRoom());
             } else {
                 openWalls |= !target.isClosed();
@@ -157,7 +156,7 @@ public class SurroundConfigFrame extends JFrame {
         typePanel = new TypeCardsPanel(texts, this::typeChanged);
         type7Panel = new Type7Panel(texts, this::settingsChanged);
         uniformPanel = new UniformPanel(texts, this::settingsChanged);
-        optionsPanel = new OptionsPanel(texts, userPreferences, !this.targets.isEmpty(), floors, upperLevel,
+        optionsPanel = new OptionsPanel(texts, userPreferences, !this.targets.isEmpty(), upperLevel,
                 this::settingsChanged);
         optionsPanel.setOnConfigureRandomProps(() -> showPropsDialog(false));
         optionsPanel.setOnConfigureGradualProps(() -> showPropsDialog(true));
@@ -1073,6 +1072,15 @@ public class SurroundConfigFrame extends JFrame {
         for (SurroundTarget target : targets) {
             if (target.getKind() == SurroundTarget.ROOM) {
                 cfg.faceSourceRooms.put(target.getRoom(), target.getSourceRooms());
+            } else if (home != null) {
+                // Floors enclosed by the walls are not "other nearby floors" for them
+                List<Room> enclosed = target.getEnclosedRooms(home.getRooms());
+                for (Room face : target.getFaces(false)) {
+                    cfg.faceSourceRooms.put(face, enclosed);
+                }
+                for (Room face : target.getFaces(true)) {
+                    cfg.faceSourceRooms.put(face, enclosed);
+                }
             }
         }
         return cfg;

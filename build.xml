@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- You may freely edit this file. See commented blocks below for -->
+<!-- some examples of how to customize the build. -->
+<!-- (If you delete it and reopen the project it will be recreated.) -->
+<!-- By default, only the Clean and Build commands use this build script. -->
+<!-- Commands such as Run, Debug, and Test only use this build script if -->
+<!-- the Compile on Save feature is turned off for the project. -->
+<!-- You can turn off the Compile on Save (or Deploy on Save) setting -->
+<!-- in the project's Project Properties dialog box.-->
+<project name="SurroundRoom" default="default" basedir=".">
+    <description>Builds, tests, and runs the project SurroundRoom.</description>
+    <import file="nbproject/build-impl.xml"/>
+    <!--
+
+    There exist several targets which are by default empty and which can be 
+    used for execution of your tasks. These targets are usually executed 
+    before and after some main targets. They are: 
+
+      -pre-init:                 called before initialization of project properties
+      -post-init:                called after initialization of project properties
+      -pre-compile:              called before javac compilation
+      -post-compile:             called after javac compilation
+      -pre-compile-single:       called before javac compilation of single file
+      -post-compile-single:      called after javac compilation of single file
+      -pre-compile-test:         called before javac compilation of JUnit tests
+      -post-compile-test:        called after javac compilation of JUnit tests
+      -pre-compile-test-single:  called before javac compilation of single JUnit test
+      -post-compile-test-single: called after javac compilation of single JUunit test
+      -pre-jar:                  called before JAR building
+      -post-jar:                 called after JAR building
+      -post-clean:               called after cleaning build products
+
+    (Targets beginning with '-' are not intended to be called on their own.)
+
+    Example of inserting an obfuscator after compilation could look like this:
+
+        <target name="-post-compile">
+            <obfuscate>
+                <fileset dir="${build.classes.dir}"/>
+            </obfuscate>
+        </target>
+
+    For list of available properties check the imported 
+    nbproject/build-impl.xml file. 
+
+
+    Another way to customize the build is by overriding existing main targets.
+    The targets of interest are: 
+
+      -init-macrodef-javac:     defines macro for javac compilation
+      -init-macrodef-junit:     defines macro for junit execution
+      -init-macrodef-debug:     defines macro for class debugging
+      -init-macrodef-java:      defines macro for class execution
+      -do-jar:                  JAR building
+      run:                      execution of project 
+      -javadoc-build:           Javadoc generation
+      test-report:              JUnit report generation
+
+    An example of overriding the target for project execution could look like this:
+
+        <target name="run" depends="SurroundRoom-impl.jar">
+            <exec dir="bin" executable="launcher.exe">
+                <arg file="${dist.jar}"/>
+            </exec>
+        </target>
+
+    Notice that the overridden target depends on the jar target and not only on 
+    the compile target as the regular run target does. Again, for a list of available 
+    properties which you can use, check the target you are overriding in the
+    nbproject/build-impl.xml file. 
+
+    -->
+    <!-- Plugin files: dist/${plugin.file.name}.jar, sh3d-dev/plugins/${plugin.file.name}.jar (Run / Debug)
+         and, if sh3d.prod.plugins.dir is set, ${plugin.file.name}.sh3p in that Sweet Home 3D plugins folder.
+         Each build deletes the previous files of this plugin in those folders before writing the new one. -->
+    <target name="-pre-jar">
+        <delete failonerror="false">
+            <fileset dir="${dist.dir}" erroronmissingdir="false"
+                     includes="${plugin.name}.jar ${plugin.name}-*.jar ${plugin.name}.sh3p ${plugin.name}-*.sh3p"/>
+        </delete>
+    </target>
+
+    <target name="-post-compile">
+        <property name="sh3d.dev.plugins.dir" location="${basedir}/sh3d-dev/plugins"/>
+        <mkdir dir="${sh3d.dev.plugins.dir}"/>
+        <delete failonerror="false">
+            <fileset dir="${sh3d.dev.plugins.dir}"
+                     includes="${plugin.name}.jar ${plugin.name}-*.jar ${plugin.name}.sh3p ${plugin.name}-*.sh3p"/>
+        </delete>
+        <jar destfile="${sh3d.dev.plugins.dir}/${plugin.file.name}.jar" duplicate="preserve">
+            <fileset dir="${build.classes.dir}"/>
+        </jar>
+    </target>
+
+    <!-- Only when sh3d.prod.plugins.dir is set (nbproject/private/private.properties) and exists -->
+    <target name="-check-prod-plugins">
+        <condition property="sh3d.prod.plugins.present">
+            <and>
+                <isset property="sh3d.prod.plugins.dir"/>
+                <available file="${sh3d.prod.plugins.dir}" type="dir"/>
+            </and>
+        </condition>
+    </target>
+
+    <target name="-post-jar" depends="-check-prod-plugins" if="sh3d.prod.plugins.present">
+        <delete failonerror="false">
+            <fileset dir="${sh3d.prod.plugins.dir}"
+                     includes="${plugin.name}.jar ${plugin.name}-*.jar ${plugin.name}.sh3p ${plugin.name}-*.sh3p"/>
+        </delete>
+        <copy file="${dist.jar}" tofile="${sh3d.prod.plugins.dir}/${plugin.file.name}.sh3p" overwrite="true"/>
+    </target>
+</project>

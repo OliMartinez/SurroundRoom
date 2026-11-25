@@ -1,7 +1,6 @@
 build/
 dist/
-nbproject/
+nbproject/private/
 sh3d-dev/
+lib/
 *.sh3p
-build.xml
-manifest.mf
